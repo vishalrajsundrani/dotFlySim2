@@ -1,0 +1,633 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <model name="m4e">
+    <pose>0 0 .24 0 0 0</pose>
+    <self_collide>false</self_collide>
+    <static>false</static>
+
+    <link name="base_link">
+      <inertial>
+        <mass>1.2190</mass>
+        <inertia>
+          <ixx>0.01753</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.01185</iyy>
+          <iyz>0</iyz>
+          <izz>0.02483</izz>
+        </inertia>
+      </inertial>
+      <gravity>true</gravity>
+      <velocity_decay />
+
+      <visual name="base_link_visual">
+        <pose>0 0 0.025 0 0 -1.570796</pose>
+        <transparency>0</transparency>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://m4e/meshes/m4_faceless.dae</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.6 0.6 0.65 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+
+      <collision name="base_link_collision_0">
+        <pose>0 0.025 0.035 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.64 0.56 0.13</size>
+          </box>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <min_depth>0.001</min_depth>
+              <max_vel>0</max_vel>
+            </ode>
+          </contact>
+          <friction>
+            <ode />
+          </friction>
+        </surface>
+      </collision>
+
+      <sensor name="air_pressure_sensor" type="air_pressure">
+        <gz_frame_id>base_link</gz_frame_id>
+        <always_on>1</always_on>
+        <update_rate>50</update_rate>
+        <air_pressure>
+          <pressure>
+            <noise type="gaussian">
+              <mean>0</mean>
+              <stddev>3</stddev>
+            </noise>
+          </pressure>
+        </air_pressure>
+      </sensor>
+
+      <sensor name="magnetometer_sensor" type="magnetometer">
+        <gz_frame_id>base_link</gz_frame_id>
+        <always_on>1</always_on>
+        <update_rate>100</update_rate>
+        <magnetometer>
+          <x>
+            <noise type="gaussian">
+              <stddev>0.0001</stddev>
+            </noise>
+          </x>
+          <y>
+            <noise type="gaussian">
+              <stddev>0.0001</stddev>
+            </noise>
+          </y>
+          <z>
+            <noise type="gaussian">
+              <stddev>0.0001</stddev>
+            </noise>
+          </z>
+        </magnetometer>
+      </sensor>
+
+      <sensor name="imu_sensor" type="imu">
+        <gz_frame_id>base_link</gz_frame_id>
+        <always_on>1</always_on>
+        <update_rate>250</update_rate>
+        <imu>
+          <angular_velocity>
+            <x>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>0.00112512</stddev>
+                <dynamic_bias_stddev>3.22e-5</dynamic_bias_stddev>
+                <dynamic_bias_correlation_time>300</dynamic_bias_correlation_time>
+              </noise>
+            </x>
+            <y>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>0.00112512</stddev>
+                <dynamic_bias_stddev>7.65e-5</dynamic_bias_stddev>
+                <dynamic_bias_correlation_time>300</dynamic_bias_correlation_time>
+              </noise>
+            </y>
+            <z>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>0.00112512</stddev>
+                <dynamic_bias_stddev>5.37e-5</dynamic_bias_stddev>
+                <dynamic_bias_correlation_time>300</dynamic_bias_correlation_time>
+              </noise>
+            </z>
+          </angular_velocity>
+          <linear_acceleration>
+            <x>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>0.01583058</stddev>
+                <dynamic_bias_stddev>1.47e-3</dynamic_bias_stddev>
+                <dynamic_bias_correlation_time>100</dynamic_bias_correlation_time>
+              </noise>
+            </x>
+            <y>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>0.01375704</stddev>
+                <dynamic_bias_stddev>9.75e-4</dynamic_bias_stddev>
+                <dynamic_bias_correlation_time>100</dynamic_bias_correlation_time>
+              </noise>
+            </y>
+            <z>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>0.01864448</stddev>
+                <dynamic_bias_stddev>1.07e-3</dynamic_bias_stddev>
+                <dynamic_bias_correlation_time>100</dynamic_bias_correlation_time>
+              </noise>
+            </z>
+          </linear_acceleration>
+        </imu>
+      </sensor>
+
+      <!-- THE HORIZONTAL STDDEV BELOW IS IN DEGREES, NOT METRES.
+           SDFormat documents position_sensing/horizontal/noise/stddev as
+           metres, but gz-sensors applies it to latitude and longitude
+           directly, i.e. in degrees (gazebosim/gz-sensors issue #325). The
+           4.5e-6 here is chosen against the implementation, not the spec:
+           4.5e-6 deg x 111320 m/deg ~= 0.50 m, which is the sigma_p = 0.5 m
+           that Cremona et al. (arXiv:2307.12836) use to model a conventional
+           GNSS receiver, and what demo_gnss_stereo_inertial's GNSS factor is
+           tuned against.
+
+           IF GAZEBO EVER FIXES #325 THIS BECOMES 4.5 MICROMETRES and the
+           simulated GNSS turns into a perfect position source overnight,
+           silently. The symptom would be localization error collapsing to
+           near zero and the GNSS residual going flat. Check this first.
+
+           Vertical stddev really is metres: 1.0 m, deliberately worse than
+           horizontal, as real GNSS altitude is. The paper notes the same
+           asymmetry and an altitude bias it leaves to future work. -->
+      <sensor name="navsat_sensor" type="navsat">
+        <gz_frame_id>base_link</gz_frame_id>
+        <always_on>1</always_on>
+        <update_rate>30</update_rate>
+        <navsat>
+          <position_sensing>
+            <horizontal>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>4.5e-6</stddev>
+              </noise>
+            </horizontal>
+            <vertical>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>1.0</stddev>
+              </noise>
+            </vertical>
+          </position_sensing>
+          <velocity_sensing>
+            <horizontal>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>0.05</stddev>
+              </noise>
+            </horizontal>
+            <vertical>
+              <noise type="gaussian">
+                <mean>0.0</mean>
+                <stddev>0.1</stddev>
+              </noise>
+            </vertical>
+          </velocity_sensing>
+        </navsat>
+      </sensor>
+
+      <!-- ===================================================================
+           FORWARD PERCEPTION STEREO PAIR
+           ===================================================================
+           The obstacle-avoidance cameras, as PSDK exposes them. On a real M4E
+           these reach a payload through DjiPerception_SubscribePerception-
+           Image(), and psdk_ros2 republishes them on
+           perception_stereo_left_stream / ..._right_stream. Format and rate
+           are taken from that aircraft, measured rather than assumed:
+           mono8 704x704 at ~20 Hz (psdk-ros2 MANIFOLD3_FOXY_PSDK316_SETUP.md).
+
+           ON base_link WITH A POSE, NOT ON A LINK OF THEIR OWN. A new link
+           needs an <inertial> block, and any mass there changes the vehicle's
+           total mass and inertia tensor, both tuned in this file and in the
+           4900_gz_m4e airframe. Sensors are massless, so a pose offset buys
+           the same geometry for nothing and cannot perturb the flight model.
+
+           NOT ON m4e_camera EITHER. That model is teleported 50 times a second
+           by gui/gimbal_stabilizer.py to cancel airframe roll and pitch, which
+           is right for a gimbal and wrong for these: DJI's perception cameras
+           are rigidly body-fixed, and a stereo pair that silently held itself
+           level would make visual-inertial fusion look far better here than it
+           can ever be on the aircraft.
+
+           GEOMETRY IS AN ASSUMPTION, and deliberately kept in one place.
+           DJI publishes neither the baseline nor the intrinsics of these
+           cameras, and DjiPerception_GetStereoCameraParameters() segfaults on
+           the M4E, so there is no way to read them off the aircraft either.
+           The 0.09 m baseline is chosen against the 0.64 x 0.56 m airframe;
+           90 degrees is a rectilinear stand-in for a fisheye pair's usable
+           centre. Both numbers are mirrored in config/perception_calib.yaml,
+           which is what any consumer should read. Change them together.
+
+           Intrinsics by the same rule as the payload lenses (see the note in
+           models/m4e_camera/model.sdf):
+             fx = (w/2)/tan(hfov/2) = 352/tan(45 deg) = 352
+             square sensor so vfov = hfov, fy = fx; cx = w/2, cy = h/2
+           Rendering is demand-driven: both rows in config/bridge.yaml are
+           lazy, so with no subscriber gz renders neither camera. -->
+      <sensor name="perception_front_left" type="camera">
+        <pose>0.30 0.045 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <topic>/drone/perception/front/left/image_raw</topic>
+        <gz_frame_id>perception_front_left</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.5708</horizontal_fov>
+          <image>
+            <width>704</width>
+            <height>704</height>
+            <format>L8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>200.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>352.0</fx>
+              <fy>352.0</fy>
+              <cx>352.0</cx>
+              <cy>352.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="perception_front_right" type="camera">
+        <pose>0.30 -0.045 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <topic>/drone/perception/front/right/image_raw</topic>
+        <gz_frame_id>perception_front_right</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.5708</horizontal_fov>
+          <image>
+            <width>704</width>
+            <height>704</height>
+            <format>L8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>200.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>352.0</fx>
+              <fy>352.0</fy>
+              <cx>352.0</cx>
+              <cy>352.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+    </link>
+
+    <link name="rotor_0">
+      <gravity>true</gravity>
+      <self_collide>false</self_collide>
+      <velocity_decay />
+      <pose>0.11551 0.18056 0.06 0 0 0</pose>
+      <inertial>
+        <mass>0.016076923076923075</mass>
+        <inertia>
+          <ixx>3.8464910483993325e-07</ixx>
+          <iyy>2.6115851691700804e-05</iyy>
+          <izz>2.649858234714004e-05</izz>
+        </inertia>
+      </inertial>
+      <visual name="rotor_0_visual">
+        <pose>-0.022 -0.14638461538461536 -0.016 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>0.8461538461538461 0.8461538461538461 0.8461538461538461</scale>
+            <uri>model://x500_base/meshes/1345_prop_ccw.stl</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="rotor_0_collision">
+        <pose>0 0 0 0 0 0 </pose>
+        <geometry>
+          <box>
+            <size>0.2792307692307692 0.016923076923076923 0.0008461538461538462</size>
+          </box>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <min_depth>0.001</min_depth>
+              <max_vel>0</max_vel>
+            </ode>
+          </contact>
+          <friction>
+            <ode />
+          </friction>
+        </surface>
+      </collision>
+    </link>
+
+    <joint name="rotor_0_joint" type="revolute">
+      <parent>base_link</parent>
+      <child>rotor_0</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1e+16</lower>
+          <upper>1e+16</upper>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <link name="rotor_1">
+      <gravity>true</gravity>
+      <self_collide>false</self_collide>
+      <velocity_decay />
+      <pose>-0.16500 -0.15826 0.06 0 0 0</pose>
+      <inertial>
+        <mass>0.016076923076923075</mass>
+        <inertia>
+          <ixx>3.8464910483993325e-07</ixx>
+          <iyy>2.6115851691700804e-05</iyy>
+          <izz>2.649858234714004e-05</izz>
+        </inertia>
+      </inertial>
+      <visual name="rotor_1_visual">
+        <pose>-0.022 -0.14638461538461536 -0.016 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>0.8461538461538461 0.8461538461538461 0.8461538461538461</scale>
+            <uri>model://x500_base/meshes/1345_prop_ccw.stl</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="rotor_1_collision">
+        <pose>0 0 0 0 0 0 </pose>
+        <geometry>
+          <box>
+            <size>0.2792307692307692 0.016923076923076923 0.0008461538461538462</size>
+          </box>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <min_depth>0.001</min_depth>
+              <max_vel>0</max_vel>
+            </ode>
+          </contact>
+          <friction>
+            <ode />
+          </friction>
+        </surface>
+      </collision>
+    </link>
+
+    <joint name="rotor_1_joint" type="revolute">
+
+      <parent>base_link</parent>
+      <child>rotor_1</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1e+16</lower>
+          <upper>1e+16</upper>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <link name="rotor_2">
+      <gravity>true</gravity>
+      <self_collide>false</self_collide>
+      <velocity_decay />
+      <pose>-0.16500 0.15826 0.06 0 0 0</pose>
+      <inertial>
+        <mass>0.016076923076923075</mass>
+        <inertia>
+          <ixx>3.8464910483993325e-07</ixx>
+          <iyy>2.6115851691700804e-05</iyy>
+          <izz>2.649858234714004e-05</izz>
+        </inertia>
+      </inertial>
+      <visual name="rotor_2_visual">
+        <pose>-0.022 -0.14638461538461536 -0.016 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>0.8461538461538461 0.8461538461538461 0.8461538461538461</scale>
+            <uri>model://x500_base/meshes/1345_prop_cw.stl</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="rotor_2_collision">
+        <pose>0 0 0 0 0 0 </pose>
+        <geometry>
+          <box>
+            <size>0.2792307692307692 0.016923076923076923 0.0008461538461538462</size>
+          </box>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <min_depth>0.001</min_depth>
+              <max_vel>0</max_vel>
+            </ode>
+          </contact>
+          <friction>
+            <ode />
+          </friction>
+        </surface>
+      </collision>
+    </link>
+
+    <joint name="rotor_2_joint" type="revolute">
+      <parent>base_link</parent>
+      <child>rotor_2</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1e+16</lower>
+          <upper>1e+16</upper>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <link name="rotor_3">
+      <gravity>true</gravity>
+
+      <self_collide>false</self_collide>
+      <velocity_decay />
+      <pose>0.11551 -0.18056 0.06 0 0 0</pose>
+      <inertial>
+        <mass>0.016076923076923075</mass>
+        <inertia>
+          <ixx>3.8464910483993325e-07</ixx>
+          <iyy>2.6115851691700804e-05</iyy>
+          <izz>2.649858234714004e-05</izz>
+        </inertia>
+      </inertial>
+      <visual name="rotor_3_visual">
+        <pose>-0.022 -0.14638461538461536 -0.016 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>0.8461538461538461 0.8461538461538461 0.8461538461538461</scale>
+            <uri>model://x500_base/meshes/1345_prop_cw.stl</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="rotor_3_collision">
+        <pose>0 0 0 0 0 0 </pose>
+        <geometry>
+          <box>
+            <size>0.2792307692307692 0.016923076923076923 0.0008461538461538462</size>
+          </box>
+        </geometry>
+        <surface>
+          <contact>
+            <ode>
+              <min_depth>0.001</min_depth>
+              <max_vel>0</max_vel>
+            </ode>
+          </contact>
+          <friction>
+            <ode />
+          </friction>
+        </surface>
+      </collision>
+    </link>
+
+    <joint name="rotor_3_joint" type="revolute">
+      <parent>base_link</parent>
+      <child>rotor_3</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-1e+16</lower>
+          <upper>1e+16</upper>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <plugin filename="gz-sim-multicopter-motor-model-system" name="gz::sim::systems::MulticopterMotorModel">
+      <jointName>rotor_0_joint</jointName>
+      <linkName>rotor_0</linkName>
+      <turningDirection>ccw</turningDirection>
+      <timeConstantUp>0.0125</timeConstantUp>
+      <timeConstantDown>0.025</timeConstantDown>
+      <maxRotVelocity>1100</maxRotVelocity>
+      <motorConstant>8.54858e-06</motorConstant>
+      <momentConstant>0.016</momentConstant>
+      <commandSubTopic>command/motor_speed</commandSubTopic>
+      <motorNumber>0</motorNumber>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+      <motorVelocityTopic>rotor_0_velocity</motorVelocityTopic>
+    </plugin>
+
+    <plugin filename="gz-sim-multicopter-motor-model-system" name="gz::sim::systems::MulticopterMotorModel">
+      <jointName>rotor_1_joint</jointName>
+      <linkName>rotor_1</linkName>
+      <turningDirection>ccw</turningDirection>
+      <timeConstantUp>0.0125</timeConstantUp>
+      <timeConstantDown>0.025</timeConstantDown>
+      <maxRotVelocity>1100</maxRotVelocity>
+      <motorConstant>8.54858e-06</motorConstant>
+      <momentConstant>0.016</momentConstant>
+      <commandSubTopic>command/motor_speed</commandSubTopic>
+      <motorNumber>1</motorNumber>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+      <motorVelocityTopic>rotor_1_velocity</motorVelocityTopic>
+    </plugin>
+
+    <plugin filename="gz-sim-multicopter-motor-model-system" name="gz::sim::systems::MulticopterMotorModel">
+      <jointName>rotor_2_joint</jointName>
+      <linkName>rotor_2</linkName>
+      <turningDirection>cw</turningDirection>
+      <timeConstantUp>0.0125</timeConstantUp>
+      <timeConstantDown>0.025</timeConstantDown>
+      <maxRotVelocity>1100</maxRotVelocity>
+      <motorConstant>8.54858e-06</motorConstant>
+      <momentConstant>0.016</momentConstant>
+      <commandSubTopic>command/motor_speed</commandSubTopic>
+      <motorNumber>2</motorNumber>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+      <motorVelocityTopic>rotor_2_velocity</motorVelocityTopic>
+    </plugin>
+
+    <plugin filename="gz-sim-multicopter-motor-model-system" name="gz::sim::systems::MulticopterMotorModel">
+      <jointName>rotor_3_joint</jointName>
+      <linkName>rotor_3</linkName>
+      <turningDirection>cw</turningDirection>
+      <timeConstantUp>0.0125</timeConstantUp>
+      <timeConstantDown>0.025</timeConstantDown>
+      <maxRotVelocity>1100</maxRotVelocity>
+      <motorConstant>8.54858e-06</motorConstant>
+      <momentConstant>0.016</momentConstant>
+      <commandSubTopic>command/motor_speed</commandSubTopic>
+      <motorNumber>3</motorNumber>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+      <motorVelocityTopic>rotor_3_velocity</motorVelocityTopic>
+    </plugin>
+  </model>
+</sdf>

@@ -1,0 +1,29 @@
+# =============================================================================
+# Build context for dotFlySim2.
+#
+# The image needs exactly three things from this repository:
+#
+#     psdk_interfaces/     the message package, built into the image
+#     px4-patches/         compiled into PX4's SITL binary
+#     vendor/              optional offline PX4 / QGroundControl archives
+#
+# Everything else is MOUNTED at run time by walker and must not be baked in —
+# see the Dockerfile header. Excluding it here keeps the build context small
+# (models/ and bags/ are the big ones) and, more importantly, means editing a
+# world or a mission can never invalidate a layer and trigger a rebuild.
+# =============================================================================
+
+# Exclude everything by default, then re-admit what the build actually reads.
+*
+
+!psdk_interfaces/
+!px4-patches/
+!vendor/
+
+# ...but never the heavyweight or generated things inside those.
+**/__pycache__/
+**/*.pyc
+**/build/
+**/install/
+**/log/
+**/.git/

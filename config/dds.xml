@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================================
+  Fast DDS transport profile for dotFlySim2.
+  ============================================================================
+
+  This is THE middleware config for the whole project. RMW_IMPLEMENTATION is
+  rmw_fastrtps_cpp everywhere (see the Dockerfile's ENV block), and this file
+  is what FASTRTPS_DEFAULT_PROFILES_FILE points at.
+
+  (A note on style: XML forbids a double hyphen inside a comment, so the
+  section rules below use '=' and prose uses ';' where you would expect a
+  dash. That is a parser rule, not a preference.)
+
+  ============================================================================
+  WHAT CHANGED FROM VERSION 1, AND WHY
+  ============================================================================
+  Version 1 had to reach a DJI Manifold 3 across a wireless LAN. That drove
+  three things: a UDPv4 transport with a 1400 byte datagram cap, multicast
+  SPDP discovery, and the Manifold named as an explicit unicast peer.
+
+  Version 2 has no Manifold. Every participant (PX4's MicroXRCEAgent,
+  ros_gz_bridge, the PSDK bridge, walkerd, RViz, rosbag2, and each C++
+  project) lives inside ONE container on ONE host. So:
+
+    1. SHARED MEMORY IS THE TRANSPORT. It is zero copy and it is the only
+       thing an in container graph needs. A 6 MB camera frame crosses it
+       without touching the IP stack, which is why V1's whole fragmentation
+       story (maxMessageSize 1400, DATA_FRAG repair, socket buffer sizing)
+       simply does not apply here.
+
+    2. UDPv4 IS KEPT, BUT PINNED TO LOOPBACK. Fast DDS still wants a network
+       transport for participant discovery announcements, and some tooling
+       behaves better with one present. Confining it to 127.0.0.1 means the
+       simulation cannot be discovered from, or leak onto, your LAN.
+
+    3. THERE IS NO MULTICAST. This is the "no multicasting" requirement,
+       enforced in two independent places so neither one is load bearing on
+       its own:
+         a. here, by leaving the default multicast metatraffic locator out
+            and giving an explicit loopback unicast locator instead;
+         b. in the environment, by ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST,
+            which ROS 2 Jazzy applies above the vendor config.
+
+  ============================================================================
+  WHY THIS MATTERS BEYOND TIDINESS
+  ============================================================================
+  Two engineers running V2 on the same office network cannot see each other's
+  aircraft, and a stray `ros2 topic pub` on a colleague's laptop cannot fly
+  your drone. In V1, on domain 42 with SUBNET discovery, both were possible.
+
+  ============================================================================
+  WHY ROS_DOMAIN_ID IS 0 AND NOT 42
+  ============================================================================
+  Domain 42 existed to share a domain with the Manifold's psdk_wrapper
+  container. With discovery confined to localhost the domain number no longer
+  isolates anything, so the default is used: one less thing to remember, and
+  one less mismatch to debug.
+
+  ============================================================================
+  THE SHM SEGMENT SIZE IS LOAD BEARING
+  ============================================================================
+  32 MB per participant, and V2 runs 8 or more of them. Docker's default
+  /dev/shm is 64 MB, which is not enough for even three: the fourth fails with
+  "RTPS_TRANSPORT_SHM Error: Failed to create segment" and then silently
+  degrades or fails to discover its peers. The container is therefore started
+  with 'shm_size=2g', and walkerd checks `df /dev/shm` at start up and warns
+  below 512 MB free. If SHM errors ever come back, check THAT first, before
+  touching anything in this file.
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+
+    <transport_descriptors>
+
+      <!-- Shared memory: the real transport for everything in this container.
+           segment_size 32 MB comfortably holds the largest frame the composer
+           will allow through plus the telemetry churn around it. -->
+      <transport_descriptor>
+        <transport_id>shm_local</transport_id>
+        <type>SHM</type>
+        <segment_size>33554432</segment_size>
+        <maxMessageSize>65500</maxMessageSize>
+      </transport_descriptor>
+
+      <!-- Loopback UDP: discovery announcements, and anything that refuses to
+           use SHM.
+
+           interfaceWhiteList takes a concrete local interface ADDRESS.
+           127.0.0.1 is the one address guaranteed to exist and guaranteed not
+           to be routable off this host.
+
+           A V1 lesson worth keeping, because it cost a day of debugging: this
+           element does NOT accept CIDR. An entry of "10.42.0.0/24" matches no
+           interface and silently confines the participant to loopback with no
+           error message at all. Here loopback IS the intent, so this element
+           is finally being used for what it actually does. -->
+      <transport_descriptor>
+        <transport_id>udp_loopback</transport_id>
+        <type>UDPv4</type>
+        <interfaceWhiteList>
+          <address>127.0.0.1</address>
+        </interfaceWhiteList>
+        <sendBufferSize>1048576</sendBufferSize>
+        <receiveBufferSize>4194304</receiveBufferSize>
+      </transport_descriptor>
+
+    </transport_descriptors>
+
+    <participant profile_name="dotflysim2_default" is_default_profile="true">
+      <rtps>
+        <!-- Only our two descriptors. useBuiltinTransports=false is what stops
+             Fast DDS from ALSO creating its default UDPv4 transport on every
+             interface, which would undo the loopback confinement above. -->
+        <userTransports>
+          <transport_id>shm_local</transport_id>
+          <transport_id>udp_loopback</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+
+        <builtin>
+          <discovery_config>
+            <discoveryProtocol>SIMPLE</discoveryProtocol>
+            <!-- Announce often enough that a unit starting mid session is
+                 found quickly; there is no radio link to be frugal for. -->
+            <leaseDuration>
+              <sec>10</sec>
+            </leaseDuration>
+            <leaseAnnouncement>
+              <sec>3</sec>
+            </leaseAnnouncement>
+          </discovery_config>
+
+          <!-- THE NO MULTICAST RULE, in the first of its two places.
+               Declaring an explicit metatraffic unicast locator on loopback
+               replaces the default multicast announcement (239.255.0.1).
+               Participants find each other over 127.0.0.1 and nowhere else. -->
+          <metatrafficUnicastLocatorList>
+            <locator>
+              <udpv4>
+                <address>127.0.0.1</address>
+              </udpv4>
+            </locator>
+          </metatrafficUnicastLocatorList>
+
+          <initialPeersList>
+            <locator>
+              <udpv4>
+                <address>127.0.0.1</address>
+              </udpv4>
+            </locator>
+          </initialPeersList>
+        </builtin>
+      </rtps>
+    </participant>
+
+  </profiles>
+</dds>

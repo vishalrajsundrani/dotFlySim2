@@ -1,0 +1,22 @@
+# walker's runtime state: socket, unit state, remembered choices.
+.walker/
+
+# Recorded flights are data, not source. Keep the directory, not its contents.
+bags/*
+!bags/.keep
+
+# Offline build inputs (multi-GB); the directory itself is committed.
+vendor/*
+!vendor/.keep
+
+# colcon
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+
+# Composed/generated at run time; always safe to delete.
+gz_runtime/

@@ -1,0 +1,457 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="m4e_camera">
+    <!-- Free-standing model (no joints to m4e itself). gui/gimbal_stabilizer.py
+         teleports gimbal_link (this model's canonical/root link) every tick
+         via Gazebo's /world/default/set_pose service: position tracks the
+         drone rigidly, orientation cancels the drone's roll/pitch. This is
+         a genuinely kinematic, zero-lag, zero-oscillation correction:
+         Gazebo renders the corrected view directly (full native FOV, no
+         crop/blur), since nothing here is post-processed pixel data.
+         camera_link and lens_link are both static (fixed) offsets from
+         gimbal_link, per spec: only the gimbal frame moves. -->
+    <link name="gimbal_link">
+      <pose>0 0 0.004 0 0 0</pose>
+      <gravity>false</gravity>
+      <inertial>
+        <mass>0.12</mass>
+        <inertia>
+          <ixx>0.00015</ixx>
+          <iyy>0.00015</iyy>
+          <izz>0.00015</izz>
+        </inertia>
+      </inertial>
+      <visual name="gimbal_joint_visual">
+        <pose>0 -0.001 0.005 0 0 -1.5708</pose>
+        <transparency>0</transparency>
+        <geometry>
+          <mesh>
+            <uri>model://m4e/meshes/gimbal_joint.dae</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.15 0.15 0.15 1</ambient>
+          <diffuse>0.2 0.2 0.2 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="camera_joint" type="fixed">
+      <parent>gimbal_link</parent>
+      <child>camera_link</child>
+    </joint>
+
+    <link name="camera_link">
+      <pose>0 0 0.004 0 0 0</pose>
+      <gravity>false</gravity>
+      <inertial>
+        <mass>0.06</mass>
+        <inertia>
+          <ixx>0.00006</ixx>
+          <iyy>0.00006</iyy>
+          <izz>0.00006</izz>
+        </inertia>
+      </inertial>
+
+      <visual name="gimbal_visual">
+        <pose>0 0 0 0 0 -1.5708</pose>
+        <transparency>0</transparency>
+        <geometry>
+          <mesh>
+            <uri>model://m4e/meshes/gimbal.dae</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.15 0.15 0.15 1</ambient>
+          <diffuse>0.2 0.2 0.2 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="lens_joint" type="fixed">
+      <parent>camera_link</parent>
+      <child>lens_link</child>
+    </joint>
+
+    <link name="lens_link">
+      <pose>0 0 0.004 0 0 0</pose>
+      <gravity>false</gravity>
+      <inertial>
+        <mass>0.04</mass>
+        <inertia>
+          <ixx>0.00004</ixx>
+          <iyy>0.00004</iyy>
+          <izz>0.00004</izz>
+        </inertia>
+      </inertial>
+
+      <sensor name="m4e_wide" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>1</update_rate>
+        <topic>/drone/camera/wide/image_raw</topic>
+        <camera>
+          <horizontal_fov>1.4661</horizontal_fov>
+          <image>
+            <width>5280</width>
+            <height>3956</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>500.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>2932.0</fx>
+              <fy>2955.9</fy>
+              <cx>2640.0</cx>
+              <cy>1978.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_medium_tele" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>1</update_rate>
+        <topic>/drone/camera/medium_tele/image_raw</topic>
+        <camera>
+          <horizontal_fov>0.6109</horizontal_fov>
+          <image>
+            <width>8064</width>
+            <height>6048</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.5</near>
+            <far>1000.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>12787.9</fx>
+              <fy>12744.3</fy>
+              <cx>4032.0</cx>
+              <cy>3024.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+     <sensor name="m4e_tele" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>1</update_rate>
+        <topic>/drone/camera/tele/image_raw</topic>
+        <camera>
+          <horizontal_fov>0.2618</horizontal_fov>
+          <image>
+            <width>8192</width>
+            <height>6144</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>1.0</near>
+            <far>2000.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>31112.2</fx>
+              <fy>31520.8</fy>
+              <cx>4096.0</cx>
+              <cy>3072.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <!-- Video / preview tiers: fixed-resolution siblings per lens, one active
+           subscription at a time via camera_switcher.py (same lazy-render pattern
+           as the photo sensors above). Intrinsics use Method B (FOV-enforced):
+           fx=(w/2)/tan(hfov/2), tan(vfov/2)=(sensor_h/sensor_w)*tan(hfov/2),
+           fy=(h/2)/tan(vfov/2), cx=w/2, cy=h/2. -->
+
+      <sensor name="m4e_wide_video4k" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/wide/video4k/image_raw</topic>
+        <camera>
+          <horizontal_fov>1.4661</horizontal_fov>
+          <image>
+            <width>3840</width>
+            <height>2160</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>500.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>2132.4</fx>
+              <fy>1614.0</fy>
+              <cx>1920.0</cx>
+              <cy>1080.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_wide_videofhd" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/wide/videofhd/image_raw</topic>
+        <camera>
+          <horizontal_fov>1.4661</horizontal_fov>
+          <image>
+            <width>1920</width>
+            <height>1080</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>500.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>1066.2</fx>
+              <fy>807.0</fy>
+              <cx>960.0</cx>
+              <cy>540.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_wide_preview" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/wide/preview/image_raw</topic>
+        <camera>
+          <horizontal_fov>1.4661</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>360</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>500.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>355.4</fx>
+              <fy>269.0</fy>
+              <cx>320.0</cx>
+              <cy>180.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_medium_tele_video4k" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/medium_tele/video4k/image_raw</topic>
+        <camera>
+          <horizontal_fov>0.6109</horizontal_fov>
+          <image>
+            <width>3840</width>
+            <height>2160</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.5</near>
+            <far>1000.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>6089.5</fx>
+              <fy>4551.5</fy>
+              <cx>1920.0</cx>
+              <cy>1080.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_medium_tele_videofhd" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/medium_tele/videofhd/image_raw</topic>
+        <camera>
+          <horizontal_fov>0.6109</horizontal_fov>
+          <image>
+            <width>1920</width>
+            <height>1080</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.5</near>
+            <far>1000.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>3044.7</fx>
+              <fy>2275.8</fy>
+              <cx>960.0</cx>
+              <cy>540.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_medium_tele_preview" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/medium_tele/preview/image_raw</topic>
+        <camera>
+          <horizontal_fov>0.6109</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>360</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.5</near>
+            <far>1000.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>1014.9</fx>
+              <fy>758.6</fy>
+              <cx>320.0</cx>
+              <cy>180.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_tele_video4k" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/tele/video4k/image_raw</topic>
+        <camera>
+          <horizontal_fov>0.2618</horizontal_fov>
+          <image>
+            <width>3840</width>
+            <height>2160</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>1.0</near>
+            <far>2000.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>14583.8</fx>
+              <fy>11081.5</fy>
+              <cx>1920.0</cx>
+              <cy>1080.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_tele_videofhd" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/tele/videofhd/image_raw</topic>
+        <camera>
+          <horizontal_fov>0.2618</horizontal_fov>
+          <image>
+            <width>1920</width>
+            <height>1080</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>1.0</near>
+            <far>2000.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>7291.9</fx>
+              <fy>5540.8</fy>
+              <cx>960.0</cx>
+              <cy>540.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="m4e_tele_preview" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/drone/camera/tele/preview/image_raw</topic>
+        <camera>
+          <horizontal_fov>0.2618</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>360</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>1.0</near>
+            <far>2000.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>2430.6</fx>
+              <fy>1846.9</fy>
+              <cx>320.0</cx>
+              <cy>180.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="lrf" type="gpu_lidar">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <visualize>true</visualize>
+        <update_rate>1</update_rate>
+        <topic>/drone/lrf/range</topic>
+        <gz_frame_id>lens_link</gz_frame_id>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>1</samples>
+              <resolution>1</resolution>
+              <min_angle>0</min_angle>
+              <max_angle>0</max_angle>
+            </horizontal>
+          </scan>
+          <range>
+            <min>1.0</min>
+            <max>1800.0</max>
+            <resolution>0.01</resolution>
+          </range>
+        </lidar>
+      </sensor>
+    </link>
+  </model>
+</sdf>

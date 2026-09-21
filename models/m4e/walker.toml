@@ -1,0 +1,153 @@
+# =============================================================================
+# m4e — DJI Matrice 4E.  A walker DRONE manifest.
+# =============================================================================
+# This file is what makes a directory of SDF selectable as an aircraft. Without
+# it a model is scenery: mountable, includable by a world, but not flyable.
+#
+# WHY TOML AND NOT YAML
+# Walker is stdlib-only (decision D2) and `tomllib` has been in the standard
+# library since Python 3.11. YAML would mean PyYAML, which means pip, which
+# means the thing D2 exists to prevent. TOML also has comments, which JSON
+# does not, and this file is mostly explanation.
+#
+# EVERYTHING HERE WAS A HARD-CODED CONSTANT IN VERSION 1 — the airframe was
+# baked into the image at build time (Dockerfile "FIX LAYER 2"), which is
+# exactly why V1's aircraft could not be changed without a rebuild.
+# =============================================================================
+
+kind  = "drone"
+title = "DJI Matrice 4E"
+notes = "Quadrotor, ~440 mm diagonal. Geometry measured from the mesh in Blender."
+
+# ── the PX4 airframe, generated at run time ─────────────────────────────────
+# tools/compose_sim.py writes these into
+#     build/px4_sitl_default/etc/init.d-posix/airframes/<id>_gz_m4e
+# immediately before PX4 starts. PX4's rcS resolves the autostart id by
+# SCANNING that directory at boot (confirmed in SPIKE-2), so no rebuild is
+# involved and `id` only has to be unique across the models you have.
+[airframe]
+id   = 4900
+type = "quadrotor"
+base = "rc.mc_defaults"
+
+[airframe.params]
+SIM_GZ_EN      = 1
+CA_AIRFRAME    = 0
+CA_ROTOR_COUNT = 4
+
+# Asymmetric M4E arm geometry, measured from the mesh.
+CA_ROTOR0_PX = 0.11551
+CA_ROTOR0_PY = -0.18056
+CA_ROTOR0_KM = 0.05
+CA_ROTOR1_PX = -0.16500
+CA_ROTOR1_PY = 0.15826
+CA_ROTOR1_KM = 0.05
+CA_ROTOR2_PX = -0.16500
+CA_ROTOR2_PY = -0.15826
+CA_ROTOR2_KM = -0.05
+CA_ROTOR3_PX = 0.11551
+CA_ROTOR3_PY = 0.18056
+CA_ROTOR3_KM = -0.05
+
+# Gazebo ESC channel mapping.
+SIM_GZ_EC_FUNC1 = 101
+SIM_GZ_EC_FUNC2 = 102
+SIM_GZ_EC_FUNC3 = 103
+SIM_GZ_EC_FUNC4 = 104
+SIM_GZ_EC_MIN1  = 150
+SIM_GZ_EC_MIN2  = 150
+SIM_GZ_EC_MIN3  = 150
+SIM_GZ_EC_MIN4  = 150
+SIM_GZ_EC_MAX1  = 1000
+SIM_GZ_EC_MAX2  = 1000
+SIM_GZ_EC_MAX3  = 1000
+SIM_GZ_EC_MAX4  = 1000
+
+# DJI performance envelope.
+MPC_THR_HOVER    = 0.60
+MPC_XY_VEL_MAX   = 21.0
+MPC_Z_VEL_MAX_UP = 10.0
+MPC_Z_VEL_MAX_DN = 8.0
+MPC_MAN_TILT_MAX = 35.0
+
+# NAV_DLL_ACT is the data-link-loss failsafe. 0 = do nothing.
+#
+# Without a MAVLink GCS ever connecting, PX4 treats "no datalink ever seen"
+# the same as "datalink lost" once COM_DL_LOSS_T elapses, and then refuses to
+# arm — silently, as far as the wrapper surface is concerned: FlightStatus
+# just reports STOPPED with nothing saying why. V2's control path is ROS 2 over
+# the XRCE agent, not MAVLink, so a GCS genuinely is not required to fly.
+#
+# walkerd RAISES this to 1 while QGC is connected and puts it back to 0 when
+# QGC exits, so the failsafe is real whenever there is a ground station to lose.
+NAV_DLL_ACT = 0
+
+# The automatic takeoff height. DJI's takeoff service is a Trigger and carries
+# no altitude, so the height is a property of the aircraft. Every C++ project
+# in projects/ is written against this value; CPP_DESIGN.md states it, and
+# walker warns when a project's TAKEOFF_ALT disagrees with it.
+MIS_TAKEOFF_ALT = 1.8
+
+# ── what gets spawned alongside the airframe ────────────────────────────────
+# The payload/gimbal is a SEPARATE Gazebo model, teleported 50 times a second
+# to track the airframe. That is not a quirk: Gazebo's set_pose only sticks on
+# a top-level model, so a stabilised gimbal has to be its own model rather than
+# a link of the drone.
+#
+# In V1 this include lived inside worlds/powerline.sdf, which welded the world
+# to one particular aircraft. Declaring it here instead is what lets any drone
+# fly in any world.
+[[attachments]]
+model = "m4e_camera"
+pose  = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+track = "gimbal"        # walkerd starts the pose relay + stabiliser for this
+
+# ── cameras ─────────────────────────────────────────────────────────────────
+# Sensor names exactly as they appear in the SDF. The composer sets
+# <always_on>false</always_on> on every one of them, which (SPIKE-1) makes
+# Gazebo render a camera only while something is subscribed — that is what
+# makes the four camera profiles switchable DURING a flight instead of only at
+# start-up, and what makes "off" cost essentially nothing.
+#
+# The LRF is deliberately absent from this table: it stays always_on because
+# PX4's EKF needs range continuously, and it is cheap.
+[cameras]
+main_stream_default = "wide/videofhd"   # feeds /wrapper/psdk_ros2/main_camera_stream
+fpv_stream_default  = "wide/preview"    # feeds /wrapper/psdk_ros2/fpv_camera_stream
+
+# The obstacle-avoidance pair. ~20 MP/s for both — cheap, and the only thing
+# demo_gnss_stereo_inertial (M9) consumes.
+[cameras.fisheye]
+model   = "m4e"
+sensors = ["perception_front_left", "perception_front_right"]
+topics  = ["/drone/perception/front/left/image_raw",
+           "/drone/perception/front/right/image_raw"]
+
+# The three gimbal lenses, each in three tiers. ~1074 MP/s with all of them
+# rendering, which is why they are off by default on a laptop.
+[cameras.payload]
+model = "m4e_camera"
+
+[cameras.payload.lenses.wide]
+photo    = "m4e_wide"
+video4k  = "m4e_wide_video4k"
+videofhd = "m4e_wide_videofhd"
+preview  = "m4e_wide_preview"
+
+[cameras.payload.lenses.medium_tele]
+photo    = "m4e_medium_tele"
+video4k  = "m4e_medium_tele_video4k"
+videofhd = "m4e_medium_tele_videofhd"
+preview  = "m4e_medium_tele_preview"
+
+[cameras.payload.lenses.tele]
+photo    = "m4e_tele"
+video4k  = "m4e_tele_video4k"
+videofhd = "m4e_tele_videofhd"
+preview  = "m4e_tele_preview"
+
+# ── the laser rangefinder ───────────────────────────────────────────────────
+[lrf]
+model  = "m4e_camera"
+sensor = "lrf"
+topic  = "/drone/lrf/range"

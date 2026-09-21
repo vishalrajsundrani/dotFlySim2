@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# =============================================================================
+# walker — the only command you need for dotFlySim2.
+#
+#   ./walker            the dashboard (TUI)
+#   ./walker up         start the container
+#   ./walker doctor     check everything, with a fix for each failure
+#   ./walker status     container and mounts
+#   ./walker shell      an interactive shell inside the container
+#
+# A launcher, not a program: it finds a usable Python and hands over to the
+# walkerui package beside it. Deliberately small, because anything it did in
+# bash it would do worse than the Python it is about to start.
+#
+# THE THREE NAMES, SO THEY ARE NEVER CONFUSED AGAIN
+#   ./walker      this launcher, on the host
+#   walkerui/     the host program: TUI, docker control, scanning, checks
+#   walkerd/      the supervisor, inside the container, owning every process
+# =============================================================================
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Python 3.10+ for the union-type syntax the package uses. Nothing else is
+# required: walker is stdlib only (decision D2), so there is no venv, no pip
+# install and no requirements.txt to drift out of date.
+PY="${WALKER_PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || {
+    echo "walker: no python3 on PATH.  sudo apt install python3" >&2
+    exit 1
+}
+"$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' || {
+    echo "walker: need Python 3.10 or newer (found $("$PY" -V 2>&1))" >&2
+    exit 1
+}
+
+cd "$HERE"
+exec "$PY" -B -m walkerui "$@"

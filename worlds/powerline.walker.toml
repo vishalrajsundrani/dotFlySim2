@@ -1,0 +1,33 @@
+# =============================================================================
+# powerline — a 220 kV double-circuit transmission corridor.  A walker WORLD
+# manifest.
+# =============================================================================
+# A bare .sdf in worlds/ is already selectable; walker infers the name from the
+# filename and the Gazebo world name by reading <world name=...>. This file
+# only adds what cannot be inferred.
+# =============================================================================
+
+title       = "220 kV powerline corridor"
+description = "5 towers, 4 spans, 800 m of line. Built from real line dimensions."
+
+# The <world name="..."> INSIDE the sdf, which is not the filename and is what
+# every gz service path is built from (/world/<this>/control). Getting it wrong
+# produces a simulation that starts and then never becomes ready.
+gz_world_name = "default"
+
+# PX4_HOME_LAT/LON/ALT. In V1 this was a sed patch applied to launch_sim.sh at
+# image build time ("FIX LAYER 5"), so every world shared one origin; here each
+# world carries its own. Karachi, Pakistan.
+[spawn]
+lat = 24.867412
+lon = 67.057352
+alt = 8.0
+
+# Scenery this world includes. walker checks these are present before starting
+# and names the missing one, rather than letting Gazebo fail with a URI error
+# halfway through loading.
+requires_models = ["hv_tower_220kv", "hv_span_220kv"]
+
+# Rendering cost, so walker can warn on a machine with no GPU.
+heavy   = true
+preview = "preview/corridor.png"

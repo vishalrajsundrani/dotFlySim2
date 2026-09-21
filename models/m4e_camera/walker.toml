@@ -1,0 +1,8 @@
+# m4e_camera — the M4E's gimbal and payload lenses.
+#
+# An ATTACHMENT, not a drone: it has no airframe and cannot be selected as an
+# aircraft. models/m4e/walker.toml names it in [[attachments]], and the
+# composer spawns it into the world alongside the airframe, where the gimbal
+# stabiliser teleports it to track the drone.
+kind  = "attachment"
+title = "M4E gimbal + payload (3 lenses x 3 tiers, + LRF)"

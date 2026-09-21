@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <world name="default">
+    <!-- System plugins are intentionally NOT listed here.
+         PX4's gz_env.sh sets GZ_SIM_SERVER_CONFIG_PATH to
+         Tools/simulation/gz/server.config which already loads Physics,
+         Sensors, IMU, AirPressure, Magnetometer, NavSat, UserCommands,
+         and SceneBroadcaster. Declaring them again would run each plugin
+         twice and corrupt the physics (double forces → drone spins). -->
+
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+
+    <scene>
+      <grid>false</grid>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.53 0.81 0.98 1</background>
+      <!-- Shadows ON. Flat, shadowless lighting is most of what makes a
+           synthetic scene look synthetic, and an inspection camera looking at
+           a lattice tower is looking at a structure whose whole shape is read
+           from the way its members shade each other. The cost is one extra
+           directional pass over ~74k triangles.
+
+           If a weak GPU struggles: set this to false and the scene renders
+           exactly as it did before. The wires opt out individually
+           (`<cast_shadows>false</cast_shadows>` in hv_span_220kv) — a 28 mm
+           conductor's shadow is thinner than a shadow-map texel, so it costs
+           a pass and produces flicker rather than a shadow. -->
+      <shadows>true</shadows>
+      <sky>
+        <time>10</time>
+        <sunrise>6</sunrise>
+        <sunset>20</sunset>
+        <clouds>
+          <speed>12</speed>
+          <mean_size>0.5</mean_size>
+          <ambient>0.8 0.8 0.8 1</ambient>
+        </clouds>
+      </sky>
+    </scene>
+
+    <!-- Textured ground plane -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>1 1</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction><ode/></friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <!-- RECEIVES shadows, never CASTS one. A 4 km quad in the shadow
+               map has no depth precision left to spare, so it shadow-acnes
+               against itself: the ground came out covered in concentric
+               ripples that look like a rendering fault because they are one.
+               Nothing is lost by opting out — a flat ground plane has no
+               shadow of its own to cast. -->
+          <cast_shadows>false</cast_shadows>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <!-- 4 km, not 1 km. The COLLISION plane above is infinite — a
+                   plane in ODE has no extent — but the VISUAL one is a real
+                   quad, and at 1000 m it ended at x=500 while the line runs
+                   out to x=860: towers 3, 4 and 5 stood over a hole with the
+                   sky showing through, and the right of way ran off a cliff.
+                   Anything that renders the far end of the corridor sees the
+                   edge, so the edge has to be past anything worth looking
+                   at. -->
+              <size>4000 4000</size>
+            </plane>
+          </geometry>
+          <material>
+            <!-- Dry scrub rather than lawn green. The saturation matters to
+                 more than taste: demo_camera_track finds a lattice tower by
+                 looking for LOW saturation against a saturated background, so
+                 a desaturated ground makes that demo's default target window
+                 harder, not easier — this is still comfortably saturated
+                 enough to separate from galvanised steel. -->
+            <ambient>0.22 0.28 0.13 1</ambient>
+            <diffuse>0.38 0.44 0.22 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>1</iyy><iyz>0</iyz><izz>1</izz>
+          </inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
+      </link>
+      <pose>0 0 0 0 0 0</pose>
+      <self_collide>false</self_collide>
+    </model>
+
+    <!-- Sun lighting -->
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1</intensity>
+      <direction>-0.8 0.2 -0.5</direction>
+      <diffuse>1.0 0.95 0.8 1</diffuse>
+      <specular>0.5 0.5 0.5 1</specular>
+      <attenuation>
+        <range>2000</range>
+        <linear>0</linear>
+        <constant>1</constant>
+        <quadratic>0</quadratic>
+      </attenuation>
+      <spot>
+        <inner_angle>0</inner_angle>
+        <outer_angle>0</outer_angle>
+        <falloff>0</falloff>
+      </spot>
+    </light>
+
+    <!-- Must match PX4_HOME_* in config/launch_sim.sh. It did not: this used
+         to carry PX4's stock Zurich default (47.3979, 8.5461) while PX4 was
+         launched at Karachi (24.867412, 67.057352, 8), so the world and the
+         flight stack disagreed about where on Earth this line stands.
+
+         PX4's own gz_bridge overrides these at spawn, which is why flight was
+         unaffected and the split went unnoticed. Anything reading Gazebo's
+         NavSat sensor directly, or converting geodetic coordinates to a local
+         ENU frame, gets whichever origin gz actually holds. A localization
+         estimator anchoring an ENU frame on a GNSS fix is exactly that kind
+         of consumer. A 4600 km disagreement is not a rounding error.
+
+         Not cosmetic for noise either. m4e's navsat horizontal noise is
+         applied in DEGREES (see the note on that sensor in
+         models/m4e/model.sdf), so its size in metres depends on latitude. At
+         Karachi a degree of longitude is ~101 km against ~111 km of latitude,
+         so horizontal error is near-isotropic, which is what the GNSS factor in
+         demo_gnss_stereo_inertial assumes. At Zurich the longitude axis was
+         ~33 % tighter than the latitude axis. -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>24.867412</latitude_deg>
+      <longitude_deg>67.057352</longitude_deg>
+      <elevation>8</elevation>
+    </spherical_coordinates>
+
+    <!-- =====================================================================
+         THE LINE — 5 towers, 4 spans, 220 kV double circuit
+         =====================================================================
+         A straight run along +X (east) at y=0, starting 60 m east of the
+         drone's spawn point. Every number below is a real one for this class
+         of line; the geometry is generated by tools/gen_powerline.py, which
+         also documents where each dimension comes from.
+
+             tower spacing      200 m          (real HV spans are 200-400 m)
+             tower height        36 m          to the earth wire peak
+             corridor length    800 m          tower_1 to tower_5
+             conductors           6            two circuits of three
+             earth wires          2
+             phase heights     17.6 / 23.1 / 28.1 m   at the insulator
+             sag                4.5 m          conductors, 3.5 m earth wires
+             lowest conductor  13.1 m          above ground, at mid-span
+
+         WHAT THIS REPLACES, AND WHY
+         —————————
+         There used to be ONE include of model://transmission_tower here, a
+         COLLADA mesh holding two towers and the wires between them, with
+         `<scale>3 3 3</scale>` on the include. That scale never applied:
+         `<scale>` is not a child of `<include>` in SDF, and libsdformat keeps
+         it as inert XML after one warning nobody reads ("XML Element[scale],
+         child of element[include], not defined in SDF"). What was actually
+         loaded was a 14.4 m tower — under half
+         the height of a real one — with a 63 m span, and no way to place a
+         third tower because both were baked into one mesh. The old model is
+         still in models/transmission_tower if you want it back.
+
+         SPANS ARE PLACED AT THE TOWER THEY START FROM. The span mesh runs
+         from its own x=0 to x=200 at the same attachment heights the tower
+         hangs its insulators at, so span_k and tower_k share a pose and the
+         wires land on the arm tips with nothing to line up by hand.
+
+         The last tower is a dead end: no span leaves it. That is deliberate
+         rather than unfinished — the line has to stop somewhere, and a span
+         going off to nothing is worse than a visible end.
+    -->
+    <include>
+      <uri>model://hv_tower_220kv</uri>
+      <name>tower_1</name>
+      <pose>60 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://hv_tower_220kv</uri>
+      <name>tower_2</name>
+      <pose>260 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://hv_tower_220kv</uri>
+      <name>tower_3</name>
+      <pose>460 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://hv_tower_220kv</uri>
+      <name>tower_4</name>
+      <pose>660 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://hv_tower_220kv</uri>
+      <name>tower_5</name>
+      <pose>860 0 0 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://hv_span_220kv</uri>
+      <name>span_1_2</name>
+      <pose>60 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://hv_span_220kv</uri>
+      <name>span_2_3</name>
+      <pose>260 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://hv_span_220kv</uri>
+      <name>span_3_4</name>
+      <pose>460 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://hv_span_220kv</uri>
+      <name>span_4_5</name>
+      <pose>660 0 0 0 0 0</pose>
+    </include>
+
+    <!-- The right of way: the strip a utility keeps cleared under a line, and
+         the access track its patrol vehicles use. Cosmetic, but it is what
+         makes the corridor read as a corridor from 100 m up instead of as
+         towers standing in a field, and it gives a downward camera something
+         with structure to look at. Thin boxes at ground level rather than
+         terrain: a 1000 x 1000 heightmap to draw two stripes would cost more
+         than the whole line does. -->
+    <model name="right_of_way">
+      <static>true</static>
+      <link name="link">
+        <visual name="cleared_strip">
+          <cast_shadows>false</cast_shadows>
+          <pose>460 0 0.01 0 0 0</pose>
+          <geometry><box><size>900 34 0.02</size></box></geometry>
+          <material>
+            <ambient>0.24 0.21 0.15 1</ambient>
+            <diffuse>0.46 0.41 0.30 1</diffuse>
+            <specular>0.03 0.03 0.03 1</specular>
+          </material>
+        </visual>
+        <visual name="access_track">
+          <cast_shadows>false</cast_shadows>
+          <pose>460 21 0.02 0 0 0</pose>
+          <geometry><box><size>900 4.5 0.02</size></box></geometry>
+          <material>
+            <ambient>0.26 0.24 0.20 1</ambient>
+            <diffuse>0.52 0.49 0.43 1</diffuse>
+            <specular>0.03 0.03 0.03 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- m4e's camera/gimbal/lens assembly: a free-standing model (not a
+         child link of m4e itself), kinematically teleported every tick by
+         gui/gimbal_stabilizer.py via /world/default/set_pose to track the
+         drone while cancelling its roll/pitch. Initial pose here is only a
+         placeholder: it snaps to the correct position within the first
+         tick once the stabilizer node is running. -->
+    <include>
+      <uri>model://m4e_camera</uri>
+      <name>m4e_camera</name>
+      <pose>0 0 0.004 0 0 0</pose>
+    </include>
+
+  </world>
+</sdf>

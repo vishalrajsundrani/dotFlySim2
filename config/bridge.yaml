@@ -1,0 +1,154 @@
+# Simulation clock
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+# Cameras: lazy=true — Gazebo renders only while a ROS2 subscriber exists.
+# The GUI subscribes for a single frame on demand, then unsubscribes.
+- ros_topic_name: "/drone/camera/wide/image_raw"
+  gz_topic_name: "/drone/camera/wide/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/medium_tele/image_raw"
+  gz_topic_name: "/drone/camera/medium_tele/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/tele/image_raw"
+  gz_topic_name: "/drone/camera/tele/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+# Video / preview tiers (9 sensors: 3 lenses x {video4k, videofhd, preview}).
+# Same lazy pattern as the photo cameras above.
+- ros_topic_name: "/drone/camera/wide/video4k/image_raw"
+  gz_topic_name: "/drone/camera/wide/video4k/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/wide/videofhd/image_raw"
+  gz_topic_name: "/drone/camera/wide/videofhd/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/wide/preview/image_raw"
+  gz_topic_name: "/drone/camera/wide/preview/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/medium_tele/video4k/image_raw"
+  gz_topic_name: "/drone/camera/medium_tele/video4k/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/medium_tele/videofhd/image_raw"
+  gz_topic_name: "/drone/camera/medium_tele/videofhd/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/medium_tele/preview/image_raw"
+  gz_topic_name: "/drone/camera/medium_tele/preview/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/tele/video4k/image_raw"
+  gz_topic_name: "/drone/camera/tele/video4k/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/tele/videofhd/image_raw"
+  gz_topic_name: "/drone/camera/tele/videofhd/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/camera/tele/preview/image_raw"
+  gz_topic_name: "/drone/camera/tele/preview/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+# Drives GstCameraSystem's selective single-stream mode (see server.config):
+# whatever gz camera topic camera_switcher.py publishes here becomes the one
+# stream sent to QGroundControl on UDP 5600.
+- ros_topic_name: "/drone/camera/gst_select"
+  gz_topic_name: "/drone/camera/gst_select"
+  ros_type_name: "std_msgs/msg/String"
+  gz_type_name: "gz.msgs.StringMsg"
+  direction: ROS_TO_GZ
+
+# Forward perception stereo pair (models/m4e/model.sdf), mono8 704x704 @ 20 Hz.
+#
+# These stand in for the M4E's obstacle-avoidance cameras. simty routes them on
+# to /wrapper/psdk_ros2/perception_stereo_{left,right}_stream when the
+# start_perception service is called, exactly as the real wrapper does.
+#
+# lazy=true, like the payload lenses: with nobody subscribed Gazebo renders
+# neither camera, so the pair costs nothing until a perception node asks for it.
+# Uncompressed these are ~495 kB a frame, ~20 MB/s for the pair, which is fine
+# over shared memory inside the container and is NOT fine over the link to a
+# Manifold -- see the datagram note in config/dds.xml.
+- ros_topic_name: "/drone/perception/front/left/image_raw"
+  gz_topic_name: "/drone/perception/front/left/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/front/right/image_raw"
+  gz_topic_name: "/drone/perception/front/right/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+# The first camera_info bridged in this repo. gz-sim derives the info topic by
+# appending /camera_info to the sensor's <topic>, which puts it under a name
+# ending in image_raw; the ROS side is renamed to the conventional sibling so
+# that image_raw and camera_info sit next to each other and message_filters can
+# pair them. The names differ on purpose -- this is not a typo.
+- ros_topic_name: "/drone/perception/front/left/camera_info"
+  gz_topic_name: "/drone/perception/front/left/image_raw/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/front/right/camera_info"
+  gz_topic_name: "/drone/perception/front/right/image_raw/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+  lazy: true
+
+# LRF: not lazy — PX4 EKF needs range continuously via gz-transport.
+- ros_topic_name: "/drone/lrf/range"
+  gz_topic_name: "/drone/lrf/range"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS

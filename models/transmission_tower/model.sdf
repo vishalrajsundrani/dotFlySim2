@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <!-- The mesh contains ONE span = TWO towers (native-mesh Z centres ~-18 and
+       ~+12.7) plus the conductors between them. Y is "up" in the mesh; the world
+       include rotates the model +90 deg about X to stand it upright.
+
+       Collision is explicit PRIMITIVES, not the mesh. The old whole-mesh <collision>
+       loaded a COLLADA trimesh, which gz/DART either drops silently or collapses to
+       a convex hull - so the drone flew straight through the tower and wires. These
+       boxes/cylinders are placed from measured mesh vertex clusters:
+         mast   : narrow central column, X in [-1.1,1.5], ~2.6 m deep in Z
+         arms   : wide cross-arm band, X out to +/-5, at mesh Y 6..14
+         wires  : 6 conductors at (X,Y) ~ (+/-3.5,6) (+/-5,8.5) (+/-3.5,10.5),
+                  running along Z between the towers
+       Nudge a number if a collision doesn't line up with the visual.
+       ponytail: wires are RIGID cylinders (drone crashes on contact). True "soft
+       tangle" needs an articulated rope (chain of links+joints per wire) - heavy and
+       unstable on a weak PC; add only if a mission actually needs it. -->
+  <model name="transmission_tower">
+    <static>true</static>
+    <link name="link">
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>meshes/tower_model_3.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <!-- ===== Tower A (mesh Z ~ -18): central mast + wide cross-arm band ===== -->
+      <collision name="mastA"><pose>0.2 3 -18 0 0 0</pose>
+        <geometry><box><size>2.6 6 3</size></box></geometry></collision>
+      <collision name="armsA"><pose>0.2 10 -17 0 0 0</pose>
+        <geometry><box><size>10.5 9 4</size></box></geometry></collision>
+
+      <!-- ===== Tower B (mesh Z ~ +12.7): same two boxes ===== -->
+      <collision name="mastB"><pose>0.2 3 12.7 0 0 0</pose>
+        <geometry><box><size>2.6 6 3</size></box></geometry></collision>
+      <collision name="armsB"><pose>0.2 10 12.7 0 0 0</pose>
+        <geometry><box><size>10.5 9 6</size></box></geometry></collision>
+
+      <!-- ===== Conductors: 6 cylinders spanning the two towers (axis = local Z) ===== -->
+      <collision name="wire_L_low"><pose>-3.5 6 -2.5 0 0 0</pose>
+        <geometry><cylinder><radius>0.15</radius><length>31</length></cylinder></geometry></collision>
+      <collision name="wire_R_low"><pose>3.5 6 -2.5 0 0 0</pose>
+        <geometry><cylinder><radius>0.15</radius><length>31</length></cylinder></geometry></collision>
+      <collision name="wire_L_out"><pose>-5 8.5 -2.5 0 0 0</pose>
+        <geometry><cylinder><radius>0.15</radius><length>31</length></cylinder></geometry></collision>
+      <collision name="wire_R_out"><pose>5 8.5 -2.5 0 0 0</pose>
+        <geometry><cylinder><radius>0.15</radius><length>31</length></cylinder></geometry></collision>
+      <collision name="wire_L_up"><pose>-3.5 10.5 -2.5 0 0 0</pose>
+        <geometry><cylinder><radius>0.15</radius><length>31</length></cylinder></geometry></collision>
+      <collision name="wire_R_up"><pose>3.5 10.5 -2.5 0 0 0</pose>
+        <geometry><cylinder><radius>0.15</radius><length>31</length></cylinder></geometry></collision>
+    </link>
+  </model>
+</sdf>

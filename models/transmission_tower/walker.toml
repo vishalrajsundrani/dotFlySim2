@@ -1,0 +1,2 @@
+# transmission_tower — scenery. Includable by a world; never selectable as an aircraft.
+kind = "scenery"

@@ -280,7 +280,10 @@ RUN mkdir -p /opt/walker/bin && \
     printf '%s\n' \
         '#!/usr/bin/env bash' \
         '# Shim: run the mounted walkerd supervisor.' \
-        'set -euo pipefail' \
+        '# set -u is OFF around the ROS overlay on purpose: setup.bash reads' \
+        '# $AMENT_TRACE_SETUP_FILES with no default, which under -u is a fatal' \
+        '# unbound-variable error naming a file nobody here wrote.' \
+        'set -eo pipefail' \
         'WD=/home/developer/ws/src/walkerd' \
         'if [ ! -d "$WD" ]; then' \
         '    echo "walkerd: $WD is not mounted into this container." >&2' \
@@ -295,7 +298,7 @@ RUN mkdir -p /opt/walker/bin && \
     printf '%s\n' \
         '#!/usr/bin/env bash' \
         '# Shim: attach this terminal to a running walkerd unit.' \
-        'set -euo pipefail' \
+        'set -eo pipefail' \
         'WD=/home/developer/ws/src/walkerd' \
         'if [ ! -d "$WD" ]; then' \
         '    echo "walker-attach: $WD is not mounted into this container." >&2' \

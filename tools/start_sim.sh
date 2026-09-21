@@ -64,6 +64,24 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# ── stale instance guard ─────────────────────────────────────────────────────
+# PX4 refuses to start with "PX4 server already running for instance 0" when
+# /tmp/px4-sock-0 exists, and that socket outlives a PX4 that was killed rather
+# than shut down. Under walkerd every unit is a supervised child, so this should
+# not happen -- but it DOES happen after a `docker exec` someone ran by hand, or
+# a crash, and the resulting error names neither the file nor the fix.
+#
+# So: if the socket is there but no PX4 owns it, it is debris. Remove it.
+if [ -S /tmp/px4-sock-0 ] && ! pgrep -r DRSW -f "[b]in/px4" >/dev/null 2>&1; then
+    echo "[sim] removing a stale /tmp/px4-sock-0 left by a PX4 that is no longer running"
+    rm -f /tmp/px4-sock-0
+fi
+if pgrep -r DRSW -f "[b]in/px4" >/dev/null 2>&1; then
+    echo "[sim] REFUSING to start: a PX4 instance is already running." >&2
+    echo "[sim] Stop it first -- under walker that is the sim unit (s)." >&2
+    exit 75
+fi
+
 echo "[sim] drone=$DRONE world=$GZ_WORLD model=$PX4_MODEL"
 echo "[sim] resource path: $RUNTIME (composed) then $HOME/gz_models"
 

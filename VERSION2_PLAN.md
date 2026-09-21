@@ -1243,7 +1243,7 @@ acceptance test passes.
 |---|---|---|
 | **M0** | **Spikes** (§21) | SPIKE-1 and SPIKE-2 answered in writing, with the commands that answered them |
 | **M1** ✅ | **Image + container + mounts** | **DONE 2026-09-21.** `docker build` succeeds; `./walker up` starts the container; all 10 mounts present and writable (checked from inside); isolation **proved**, not asserted — `walker doctor --deep` publishes a topic in the stack's container and confirms a separate container on the same bridge network cannot see it. `walker doctor` is the executable form of this test and exits non-zero in CI. |
-| **M2** 🔶 | **walkerd + walker skeleton** | **Partially done.** ✅ The `sim` unit boots end to end from manifests (composer → generated airframe → composed world → PX4+Gazebo+XRCE+ros_gz_bridge), and `walkerd/probes.py` names the failing link when Gazebo is killed. ⬜ Remaining: the walkerd supervisor proper (unit table, PTY supervision, JSON socket, `walker-attach`) and the curses dashboard. See Appendix D. |
+| **M2** ✅ | **walkerd + walker skeleton** | **DONE 2026-09-21.** Dashboard renders with live link rates. Socket round-trip **0.064 ms median / 0.83 ms max** over 200 calls (budget was <1 ms). The `sim` unit starts (20 s to ready), runs, and stops in 1 s **leaving no orphans**, all through walkerd. The readiness probe names the failing layer when Gazebo is killed. Constraint matrix enforced from one table. `walker dump` renders a frame as text so the layout is testable in CI. |
 | **M3** | **World + drone selection** | `powerline` + `m4e` selected from the scan; a second world dropped into `worlds/` appears on `F5` and flies; the generated airframe file matches V1’s byte for byte in the m4e case |
 | **M4** | **Bridge always-on + full PSDK surface** | `ros2 topic list \| grep wrapper` shows all 41+5; `ros2 service list` shows 56; the rates in §13.1 are within ±20 % of the PDF; service introspection is on |
 | **M5** | **C++ projects + terminals + constraints** | `demo_orbit_mission` flies a clean 2-lap orbit and lands; starting a second project is refused with the right message; each unit opens its own ptyxis window; walker shows the project’s step transitions in its log pane |
@@ -1517,6 +1517,46 @@ runs:
 
 and killing Gazebo names the layer that died rather than reporting a generic
 failure.
+
+### D-6 — PX4 versions its uORB topics, and the old name still appears (**shaped the watcher**)
+
+The graph carries **both** `/fmu/out/vehicle_status_v1` and
+`/fmu/out/vehicle_status_v4`; on this build only `v4` publishes. Subscribing to
+`v1` gives a topic that exists, reports a publisher, and never delivers a
+message — the silent failure these probes exist to catch, and one that would
+return with every PX4 upgrade.
+
+`walkerd/rosnode.py` therefore takes a **list of candidate topics** per link and
+counts them together, so a version bump does not silently blind the dashboard.
+
+### D-7 — The persistent watcher was not just faster, it was more accurate
+
+Replacing the per-call probe with one long-lived rclpy node changed the numbers
+it reported, because a node created for a 2.5 s measurement spends most of that
+window on discovery:
+
+| link | per-call node | persistent node | truth |
+|---|---|---|---|
+| `/clock` | "no messages" | 250.0 Hz | 250 Hz |
+| `/fmu/out/sensor_combined` | 121.6 Hz | 250.0 Hz | 250 Hz |
+| `/fmu/out/vehicle_attitude` | 24.4 Hz | 50.0 Hz | 50 Hz |
+
+Everything was being undercounted by roughly half, and `/clock` was being
+reported as dead on a healthy simulation. Time to "sim ready" also fell from
+36 s to 20 s, because readiness no longer waits for a fresh participant to
+discover the graph on every poll. Probe latency is now ~20 ms.
+
+### D-8 — Bounds-safe curses writes
+
+`addstr` raises on a write to the bottom-right cell — it tries to advance the
+cursor past the end of the screen — so a full-width status bar crashed the whole
+UI on its first paint. It also raises for any write starting off-screen, which
+happens as soon as the window is made narrow. Every write now goes through one
+clipping helper; the dashboard degrades instead of dying.
+
+`walker dump` was added for the same reason: a curses layout cannot be checked
+by reading the code, and capturing a real terminal means re-implementing one.
+Asking curses itself what is on screen (`instr`) is exact and works in CI.
 
 ---
 

@@ -35,7 +35,14 @@ def cmd_up(args: argparse.Namespace) -> int:
             (ui.err if i == 0 else ui.info)(line)
         return 1
     ui.ok("container is up")
-    ui.info("next:  walker doctor    (verifies mounts, isolation and the ROS graph)")
+    try:
+        for note in dockerctl.start_walkerd():
+            ui.info(note)
+    except dockerctl.DockerError as e:
+        ui.err(str(e))
+        return 1
+    ui.ok("walkerd is supervising")
+    ui.info("next:  ./walker          (the dashboard)")
     return 0
 
 
@@ -73,6 +80,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dump(args: argparse.Namespace) -> int:
+    from . import app
+    return app.run_dump(args.settle)
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     st = dockerctl.state()
     print(f"\n{ui.BOLD}dotFlySim2{ui.RESET}   container {st.label}   image {paths.IMAGE}\n")
@@ -95,8 +107,18 @@ def cmd_shell(args: argparse.Namespace) -> int:
 
 
 def cmd_tui(args: argparse.Namespace) -> int:
-    ui.warn("the TUI lands in M2; until then use: walker up | doctor | status | shell")
-    return cmd_status(args)
+    """The dashboard. Brings the stack up far enough to have something to show."""
+    if not dockerctl.state().running:
+        ui.err("the container is not running")
+        ui.info("walker up")
+        return 1
+    try:
+        dockerctl.start_walkerd()
+    except dockerctl.DockerError as e:
+        ui.err(str(e))
+        return 1
+    from . import app
+    return app.run()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,6 +137,10 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("doctor", help="check everything, with a fix for each failure")
     s.add_argument("--deep", action="store_true", help="include the slow checks")
     s.set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("dump", help="render one dashboard frame as text (for tests/CI)")
+    s.add_argument("--settle", type=float, default=6.0)
+    s.set_defaults(fn=cmd_dump)
 
     sub.add_parser("status", help="container and mounts").set_defaults(fn=cmd_status)
     sub.add_parser("shell", help="interactive shell inside the container").set_defaults(fn=cmd_shell)

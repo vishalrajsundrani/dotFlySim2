@@ -269,3 +269,33 @@ def exec_(cmd: str, timeout: float = 60, ros: bool = True, check: bool = False) 
     if check and cp.returncode != 0:
         raise DockerError(out.strip() or f"command failed inside the container: {cmd}")
     return cp.returncode, out.strip()
+
+
+def walkerd_running() -> bool:
+    rc, _ = exec_("pgrep -r DRSW -f '[w]alkerd/__main__.py' >/dev/null", ros=False, timeout=30)
+    return rc == 0
+
+
+def start_walkerd(wait: float = 15.0) -> list[str]:
+    """
+    Start the supervisor inside the container, if it is not already up.
+
+    Detached and in its own session, so it outlives the `docker exec` that
+    started it. It is walkerd, not this exec, that must own the units -- that
+    ownership is the whole reason the orphan problems of V1 do not recur.
+    """
+    import time
+    if walkerd_running():
+        return ["walkerd already running"]
+    subprocess.Popen(
+        engine() + ["exec", "-d", paths.CONTAINER, "bash", "-lc",
+                    "walkerd > /tmp/walkerd.log 2>&1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if paths.socket_path().exists() and walkerd_running():
+            return ["walkerd up"]
+        time.sleep(0.5)
+    rc, out = exec_("tail -5 /tmp/walkerd.log", ros=False, timeout=30)
+    raise DockerError("walkerd did not start. Its last words:\n    " +
+                      out.replace("\n", "\n    "))

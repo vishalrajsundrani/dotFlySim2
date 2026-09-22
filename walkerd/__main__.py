@@ -98,7 +98,12 @@ class Daemon:
         self.units: dict[str, Unit] = {}
         self.server = Server(SOCKET, self.handle)
         self.selection = {"drone": "m4e", "world": "powerline",
-                          "cameras": "none", "qgc_video": False}
+                          "cameras": "none", "qgc_video": False,
+                          # A Gazebo window by default: the usual reason to run
+                          # a simulation is to watch it. CI and remote shells
+                          # turn it off, and start_sim.sh falls back to
+                          # headless by itself when DISPLAY does not answer.
+                          "gui": True}
         self._define_units()
 
     # ── the unit table ───────────────────────────────────────────────────────
@@ -230,6 +235,10 @@ class Daemon:
         # and which camera profile are decisions made on walker's screens, and
         # compose_sim.py turns them into the files PX4 and Gazebo will read.
         if name == "sim":
+            # The window is a per-run choice, so it is passed at start rather
+            # than baked into the unit.
+            self.units["sim"].spec.env["SIM_HEADLESS"] = (
+                "0" if self.selection.get("gui", True) else "1")
             err = self.compose()
             if err:
                 return {"ok": False, "error": "compose failed", "reason": err}
@@ -341,7 +350,7 @@ class Daemon:
         if op == "stop":
             return self.op_stop(req)
         if op == "select":
-            for k in ("drone", "world", "cameras", "qgc_video"):
+            for k in ("drone", "world", "cameras", "qgc_video", "gui"):
                 if k in req.get("args", {}):
                     self.selection[k] = req["args"][k]
             self.server.broadcast({"ev": "selection", **self.selection})

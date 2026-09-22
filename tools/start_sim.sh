@@ -86,9 +86,53 @@ echo "[sim] drone=$DRONE world=$GZ_WORLD model=$PX4_MODEL"
 echo "[sim] resource path: $RUNTIME (composed) then $HOME/gz_models"
 
 # ── 1. Gazebo ────────────────────────────────────────────────────────────────
+# ── is there a screen to draw on? ───────────────────────────────────────────
+# A simulation you cannot see is the right answer for CI and the wrong answer
+# for a person, so the default follows the environment rather than a constant.
+#
+#   SIM_HEADLESS=1   never open a window (CI, a remote shell, a benchmark)
+#   SIM_HEADLESS=0   always open one, and fail loudly if it cannot
+#   unset            open one when DISPLAY is set and actually answers
+#
+# The probe matters: DISPLAY can be set and still be unusable -- no X11 socket
+# mounted, xhost refusing this container, a stale value inherited from a
+# previous session. Gazebo's GUI then dies a few seconds after start with an
+# Ogre error, long after the "starting" message scrolled past, and the
+# simulation appears to have come up fine. Better to find out here and say so.
+want_gui() {
+    [ "${SIM_HEADLESS:-}" = "1" ] && return 1
+    if [ -z "${DISPLAY:-}" ]; then
+        [ "${SIM_HEADLESS:-}" = "0" ] && echo "[sim] SIM_HEADLESS=0 but DISPLAY is unset" >&2
+        return 1
+    fi
+    if command -v xdpyinfo >/dev/null 2>&1; then
+        if ! timeout 5 xdpyinfo >/dev/null 2>&1; then
+            echo "[sim] DISPLAY=$DISPLAY is set but not answering; running headless." >&2
+            echo "[sim] On the host:  xhost +local:   (walker does this for you)" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+if want_gui; then
+    GUI=1
+    echo "[sim] display $DISPLAY is available: the Gazebo window will open"
+else
+    GUI=0
+    echo "[sim] running headless (no Gazebo window)"
+fi
+
 echo "[sim] 1/4 starting Gazebo: $WORLD_SDF"
+# The SERVER always runs with -s. Whether pixels reach a window is the GUI
+# client's business, and the two are separate processes in gz Harmonic.
+#
+# --headless-rendering is NOT the same as "no GUI": it selects an offscreen
+# rendering path (EGL) for the server's own sensor rendering. With a window we
+# want the normal path, because the cameras and the GUI then share one GL
+# context instead of fighting for the GPU.
 GZ_ARGS=(-r -s --verbose=1 "$WORLD_SDF")
-[ "${SIM_HEADLESS:-1}" = "1" ] && GZ_ARGS=(--headless-rendering "${GZ_ARGS[@]}")
+[ "$GUI" = "0" ] && GZ_ARGS=(--headless-rendering "${GZ_ARGS[@]}")
 gz sim "${GZ_ARGS[@]}" &
 PIDS+=($!)
 
@@ -102,6 +146,29 @@ for i in $(seq 1 120); do
     sleep 1
     [ "$i" = "120" ] && { echo "[sim] Gazebo never advertised /world/$GZ_WORLD/control" >&2; exit 1; }
 done
+
+# ── 1b. the Gazebo window ────────────────────────────────────────────────────
+# Started AFTER the world is loaded, not before: a GUI client that connects to
+# a server still parsing a 300-tower world shows an empty scene and sometimes
+# gives up entirely.
+#
+# It is deliberately NOT in PIDS with a plain kill: closing the window must not
+# stop the simulation, and stopping the simulation should take the window with
+# it. The trap kills the whole process group, which covers it.
+if [ "$GUI" = "1" ]; then
+    echo "[sim]     opening the Gazebo window"
+    gz sim -g > /tmp/gz_gui.log 2>&1 &
+    GUI_PID=$!
+    # A GUI that dies immediately is worth reporting now, while the reason is
+    # still the last thing in its log, rather than leaving someone wondering
+    # where the window went.
+    sleep 4
+    if ! kill -0 "$GUI_PID" 2>/dev/null; then
+        echo "[sim] the Gazebo window failed to open. Last lines:" >&2
+        tail -5 /tmp/gz_gui.log 2>/dev/null | sed "s/^/[sim]   /" >&2
+        echo "[sim] the simulation is still running; this is only the window." >&2
+    fi
+fi
 
 # ── 2. the XRCE agent ────────────────────────────────────────────────────────
 echo "[sim] 2/4 starting Micro XRCE-DDS agent on udp4:8888"

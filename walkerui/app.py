@@ -295,6 +295,7 @@ class App:
             ("WORLD", "w", sel.get("world", "-")),
             ("DRONE", "d", sel.get("drone", "-")),
             ("CAMERAS", "c", sel.get("cameras", "-")),
+            ("WINDOW", "g", "gazebo window" if sel.get("gui", True) else "headless"),
         ):
             self.put(row, 2, label, curses.color_pair(C_DIM))
             self.put(row, 12, str(value)[:28], curses.A_BOLD)
@@ -360,7 +361,7 @@ class App:
         # Status line, then the key bar.
         if self.status and time.time() < self.status_until:
             self.put(h - 2, 2, self.status, curses.color_pair(C_WARN))
-        bar = " [s]im  [w]orld  [d]rone  [c]ameras  [t]erminal  [P]robe  [?]help  [Q]uit "
+        bar = " [s]im [w]orld [d]rone [c]ameras [g]window [t]erminal [P]robe [?]help [Q]uit "
         self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
         s.refresh()
 
@@ -401,14 +402,26 @@ class App:
         elif k == "t":
             self.open_terminal("sim")
         elif k == "?":
-            self.say("keys: s sim · w world · d drone · c cameras · F5 rescan · "
-                     "P probe · t terminal · Q quit", 10)
+            self.say("keys: s sim · w world · d drone · c cameras · g window · "
+                     "F5 rescan · P probe · t terminal · Q quit", 10)
         elif k == "w":
             self.open_picker("world")
         elif k == "d":
             self.open_picker("drone")
         elif k == "c":
             self.open_picker("cameras")
+        elif k == "g":
+            want = not self.selection.get("gui", True)
+
+            def go():
+                self.c.select(gui=want)
+                with self._lock:
+                    self.selection["gui"] = want
+                running = self.units.get("sim", {}).get("state") in ("running", "starting")
+                self.say(("gazebo window on" if want else "headless")
+                         + (" — restart the sim (s) for it to take effect" if running else ""),
+                         10 if running else 5)
+            self.bg("select", go)
 
     def open_terminal(self, unit: str) -> None:
         from .terminal import open_window

@@ -171,7 +171,26 @@ def conf(name: str) -> dict:
 
 
 def listing() -> list[dict]:
+    """
+    Every project, with its build state AND what it asks the simulation for.
+
+    The build state alone is not enough to choose from: "never built" tells you
+    nothing about whether a mission needs cameras, which setpoint frame it
+    steers in, or how high it climbs. Those come from project.conf and are what
+    you actually pick between.
+    """
     if not os.path.isdir(PROJECTS):
         return []
-    return [status(n) for n in sorted(os.listdir(PROJECTS))
-            if os.path.isdir(os.path.join(PROJECTS, n))]
+    out = []
+    for name in sorted(os.listdir(PROJECTS)):
+        if not os.path.isdir(os.path.join(PROJECTS, name)):
+            continue
+        st = status(name)
+        c = conf(name)
+        wants = [f"cameras={c.get('CAMERAS', 'none')}",
+                 f"setpoint={c.get('SETPOINT', 'velocity')}"]
+        if c.get("RVIZ"):
+            wants.append("rviz")
+        st["wants"] = " · ".join(wants)
+        out.append(st)
+    return out

@@ -23,6 +23,22 @@ from collections import deque
 from . import paths, scan
 from .client import Client, WalkerdError
 
+RUNNING = "running"
+
+# Units that get their own terminal window the moment they start.
+#
+# These are the ones whose output is worth watching live and far too long for
+# the dashboard's log pane: Gazebo and PX4's console, the bridge's route table,
+# RViz's complaints, QGC's link messages, a mission's step transitions, a bag's
+# progress line. Opening the window when the unit starts is what an operator
+# would do by hand a second later anyway.
+#
+# `cameras` is deliberately absent -- it is a quiet relay that says almost
+# nothing -- and so is `record`, whose one useful number (elapsed, size) is
+# already on the dashboard. A window per unit only helps while every window
+# earns its place.
+TERMINAL_UNITS = ("sim", "bridge", "project", "rviz", "qgc", "replay")
+
 # Colour pairs, allocated once in main().
 C_OK, C_WARN, C_FAIL, C_DIM, C_HEAD, C_KEY = 1, 2, 3, 4, 5, 6
 
@@ -66,7 +82,13 @@ class App:
         # state, so events keep arriving and the simulation keeps running
         # while you browse. None means the dashboard is showing.
         self.picker: dict | None = None
+        # A modal question drawn over everything: {"text", "options", "on"}.
+        self.confirm: dict | None = None
+        # Units whose terminal window walker has already opened, so a unit that
+        # flaps between states does not spawn a window every time.
+        self.opened: set[str] = set()
         self.quit = False
+        self.shutdown_on_quit = False
         self._lock = threading.RLock()
 
     # ── events from walkerd ──────────────────────────────────────────────────
@@ -75,7 +97,24 @@ class App:
         kind = ev.get("ev")
         with self._lock:
             if kind == "unit":
-                self.units[ev["name"]] = ev
+                name, state = ev["name"], ev.get("state")
+                self.units[name] = ev
+                # EVERY NOISY UNIT GETS ITS OWN WINDOW, automatically.
+                #
+                # These are the units whose output is worth watching live and
+                # too long to fit in the dashboard's log pane: Gazebo and PX4's
+                # console, the bridge's route table, RViz's complaints, QGC's
+                # link messages, a mission's step transitions. Opening the
+                # window when the unit starts is what the operator would do by
+                # hand a second later anyway.
+                if (state == RUNNING and name in TERMINAL_UNITS
+                        and name not in self.opened):
+                    self.opened.add(name)
+                    threading.Thread(target=self.open_terminal, args=(name,),
+                                     daemon=True).start()
+                elif state in ("stopped", "failed"):
+                    # Let it open a fresh window next time it runs.
+                    self.opened.discard(name)
             elif kind == "log":
                 self.log.append((ev.get("t", time.time()), ev.get("unit", "?"),
                                  ev.get("level", "info"), ev.get("text", "")))
@@ -163,6 +202,36 @@ class App:
         except curses.error:
             pass
 
+    # ── a modal question ─────────────────────────────────────────────────────
+
+    def ask(self, text: str, options: list[tuple[str, str]], on) -> None:
+        """
+        Put a question on screen. `options` is [(key, label)], `on(key)` acts.
+
+        Used for the one decision walker must not guess: what to do with the
+        running stack when you leave. Quitting silently either way is wrong --
+        tearing down a simulation someone wanted to keep, or leaving a container
+        and a Gazebo running for someone who thought they had closed it.
+        """
+        self.confirm = {"text": text, "options": options, "on": on}
+
+    def draw_confirm(self) -> None:
+        h, w = self.scr.getmaxyx()
+        cf = self.confirm
+        lines = [cf["text"], ""] + [f"  [{k}]  {label}" for k, label in cf["options"]]
+        box_w = min(w - 4, max(len(l) for l in lines) + 6)
+        box_h = len(lines) + 4
+        top = max(0, (h - box_h) // 2)
+        left = max(0, (w - box_w) // 2)
+        for i in range(box_h):
+            self.put(top + i, left, " " * box_w, curses.color_pair(C_HEAD))
+        self.put(top + 1, left + 3, cf["text"],
+                 curses.color_pair(C_HEAD) | curses.A_BOLD)
+        for i, (k, label) in enumerate(cf["options"]):
+            self.put(top + 3 + i, left + 3, f"[{k}]  {label}",
+                     curses.color_pair(C_HEAD))
+        self.scr.refresh()
+
     # ── the picker ───────────────────────────────────────────────────────────
 
     def _locked(self, setting: str) -> bool:
@@ -186,7 +255,26 @@ class App:
         something in the directory -- so that press is the one time the cache
         must not be trusted.
         """
-        if kind == "cameras":
+        if kind == "project":
+            # Built from walkerd's view, not the host scan: only walkerd knows
+            # whether a binary is up to date with its sources, and running a
+            # stale mission is the failure that wastes the most time.
+            try:
+                rows = self.c.call("projects").get("projects", [])
+            except WalkerdError as e:
+                self.say(str(e).splitlines()[0]); return
+            items = []
+            for r in rows:
+                state = r.get("state", "?")
+                items.append(scan.Entry(
+                    name=r["name"], path=paths.REPO, kind="project",
+                    title={"built": "ready", "stale": "needs rebuild",
+                           "unbuilt": "never built", "broken": "broken",
+                           "missing": "missing"}.get(state, state),
+                    detail=r.get("wants", "") or r.get("detail", ""),
+                    error="" if state in ("built", "stale", "unbuilt") else r.get("detail", "")))
+            current = self.selection.get("project", "")
+        elif kind == "cameras":
             items = [scan.Entry(name=p, path=paths.REPO, kind="camera",
                                 title=_CAMERA_TITLES[p][0],
                                 detail=_CAMERA_TITLES[p][1])
@@ -239,6 +327,19 @@ class App:
             # simulation is composed. That difference is the whole point of
             # subscription-driven rendering, and hiding it would make the two
             # cases look alike when they behave nothing alike.
+            if field == "project":
+                r = self.c.start("project", package=entry.name)
+                if r.get("ok"):
+                    with self._lock:
+                        self.selection["project"] = entry.name
+                    self.say(f"{entry.name}: preparing (builds if stale, then flies)", 8)
+                    for a in r.get("advisories", []):
+                        self.say(a, 10)
+                else:
+                    self.say(f"{entry.name} refused: {r.get('reason','?')}  "
+                             f"[{r.get('hint','')}]", 12)
+                return
+
             if field == "cameras" and live_sim:
                 r = self.c.call("cameras", args={"profile": entry.name})
                 if r.get("ok"):
@@ -270,7 +371,8 @@ class App:
         h, w = s.getmaxyx()
         kind = pk["kind"]
         heading = {"world": "Worlds — worlds/", "drone": "Drones — models/",
-                   "cameras": "Camera profile"}[kind]
+                   "cameras": "Camera profile",
+                   "project": "Projects — projects/   (enter builds if needed, then flies)"}[kind]
         self.put(0, 0, f" {heading} ".ljust(w),
                  curses.color_pair(C_HEAD) | curses.A_BOLD)
 
@@ -302,16 +404,25 @@ class App:
         bar = (" [↑↓/jk] move   [enter] choose   [F5] rescan   [esc] back "
                "   • = current ")
         self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
-        s.refresh()
 
     # ── drawing ──────────────────────────────────────────────────────────────
 
     def draw(self) -> None:
-        s = self.scr
-        s.erase()
+        self.scr.erase()
+        if self.confirm is not None:
+            # Drawn over the dashboard rather than instead of it, so the state
+            # you are deciding about stays visible behind the question.
+            self._draw_dashboard()
+            self.draw_confirm()
+            return
         if self.picker is not None:
             self.draw_picker()
             return
+        self._draw_dashboard()
+        self.scr.refresh()
+
+    def _draw_dashboard(self) -> None:
+        s = self.scr
         h, w = s.getmaxyx()
         if h < 18 or w < 70:
             self.put(0, 0, "terminal too small (need 70x18)"[:w - 1])
@@ -421,6 +532,14 @@ class App:
             k = chr(ch) if 0 <= ch < 0x110000 else ""
         except ValueError:
             k = ""
+        if self.confirm is not None:
+            cf = self.confirm
+            if k in [o[0] for o in cf["options"]]:
+                self.confirm = None
+                cf["on"](k)
+            elif ch == 27:                      # esc cancels
+                self.confirm = None
+            return
         if self.picker is not None:
             self.picker_key(k, ch)
             return
@@ -430,9 +549,25 @@ class App:
             self.say("rescanned models/, worlds/, bags/, projects/")
             return
         if k in ("Q",):
-            self.quit = True
+            def decide(choice: str) -> None:
+                if choice == "l":
+                    self.quit = True
+                elif choice == "s":
+                    self.shutdown_on_quit = True
+                    self.quit = True
+            self.ask("Leave walker — what about the running stack?",
+                     [("l", "leave it running (walker reopens instantly)"),
+                      ("s", "stop everything: units, then the container"),
+                      ("esc", "cancel")],
+                     decide)
         elif k == "s":
             self.toggle_unit("sim")
+        elif k == "p":
+            state = self.units.get("project", {}).get("state", "stopped")
+            if state in ("running", "starting"):
+                self.toggle_unit("project")          # stop the running mission
+            else:
+                self.open_picker("project")          # choose which one to fly
         elif k in UNIT_KEYS.values():
             name = next((n for n, kk in UNIT_KEYS.items() if kk == k), None)
             if name in self.units:
@@ -496,7 +631,7 @@ class App:
             time.sleep(0.05)
 
 
-def dump(stdscr, settle: float = 6.0, keys: str = "") -> str:
+def dump(stdscr, settle: float = 6.0, keys: str = "", hold: float = 0.6) -> str:
     """
     Draw one settled frame and return the screen as text.
 
@@ -524,7 +659,11 @@ def dump(stdscr, settle: float = 6.0, keys: str = "") -> str:
         for _ in range(8):
             app.draw()
             time.sleep(0.05)
-    for _ in range(12):
+    # `hold` keeps the app alive after the keystrokes so slow consequences --
+    # a simulation coming up, a terminal window opening -- actually happen
+    # while something is there to react to them.
+    end = time.time() + hold
+    while time.time() < end:
         app.draw()
         time.sleep(0.05)
     h, w = stdscr.getmaxyx()
@@ -560,13 +699,16 @@ def main(stdscr) -> int:
         app.run()
     finally:
         client.close()
-    return 0
+    # Reported back to the CLI, which owns the container: tearing it down from
+    # inside curses would mean drawing a teardown log onto a screen that is
+    # about to be restored.
+    return 10 if app.shutdown_on_quit else 0
 
 
 def run() -> int:
     return curses.wrapper(main)
 
 
-def run_dump(settle: float = 6.0, keys: str = "") -> int:
-    print(curses.wrapper(dump, settle, keys))
+def run_dump(settle: float = 6.0, keys: str = "", hold: float = 0.6) -> int:
+    print(curses.wrapper(dump, settle, keys, hold))
     return 0

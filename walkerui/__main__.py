@@ -84,8 +84,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_dump(args: argparse.Namespace) -> int:
+    # Brings the stack up like the TUI does, so a capture is of the real thing
+    # rather than of an error screen.
+    try:
+        dockerctl.start(force_recreate=False)
+        dockerctl.start_walkerd()
+    except dockerctl.DockerError as e:
+        ui.err(str(e).splitlines()[0])
+        return 1
     from . import app
-    return app.run_dump(args.settle, getattr(args, "keys", ""))
+    return app.run_dump(args.settle, getattr(args, "keys", ""),
+                        getattr(args, "hold", 0.6))
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -110,18 +119,48 @@ def cmd_shell(args: argparse.Namespace) -> int:
 
 
 def cmd_tui(args: argparse.Namespace) -> int:
-    """The dashboard. Brings the stack up far enough to have something to show."""
-    if not dockerctl.state().running:
-        ui.err("the container is not running")
-        ui.info("walker up")
-        return 1
+    """
+    The dashboard, and the whole lifecycle around it.
+
+    `./walker` is meant to be the only command anyone has to know, so it brings
+    the container and the supervisor up itself rather than failing with advice
+    to run something else first. Requiring `walker up` beforehand made the
+    dashboard feel like a second step in a procedure instead of the thing you
+    run.
+
+    On the way out it asks what to do with the running stack, and the answer is
+    honoured HERE rather than inside curses: stopping a container prints a
+    teardown log, and printing onto a screen that curses is about to restore
+    produces a mess.
+    """
+    ui.step("starting dotFlySim2")
     try:
-        dockerctl.start_walkerd()
+        for note in dockerctl.start(force_recreate=False):
+            ui.info(note)
+        for note in dockerctl.start_walkerd():
+            ui.info(note)
     except dockerctl.DockerError as e:
-        ui.err(str(e))
+        for i, line in enumerate(str(e).splitlines()):
+            (ui.err if i == 0 else ui.info)(line)
         return 1
+
     from . import app
-    return app.run()
+    rc = app.run()
+
+    if rc == 10:                       # "stop everything" was chosen
+        ui.step("stopping the stack")
+        try:
+            for note in dockerctl.stop_walkerd():
+                ui.info(note)
+            for note in dockerctl.stop(remove=False):
+                ui.info(note)
+            ui.ok("stopped — `./walker` starts it again")
+        except dockerctl.DockerError as e:
+            ui.err(str(e))
+            return 1
+        return 0
+    ui.info("walker closed; the stack is still running (./walker reopens it)")
+    return rc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -147,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("dump", help="render one dashboard frame as text (for tests/CI)")
     s.add_argument("--settle", type=float, default=6.0)
     s.add_argument("--keys", default="", help="keystrokes to apply before capturing")
+    s.add_argument("--hold", type=float, default=0.6,
+                   help="seconds to keep running after the keys, so slow "
+                        "consequences (a sim starting, a window opening) happen")
     s.set_defaults(fn=cmd_dump)
 
     sub.add_parser("status", help="container and mounts").set_defaults(fn=cmd_status)

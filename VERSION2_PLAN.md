@@ -1244,7 +1244,7 @@ acceptance test passes.
 | **M0** | **Spikes** (§21) | SPIKE-1 and SPIKE-2 answered in writing, with the commands that answered them |
 | **M1** ✅ | **Image + container + mounts** | **DONE 2026-09-21.** `docker build` succeeds; `./walker up` starts the container; all 10 mounts present and writable (checked from inside); isolation **proved**, not asserted — `walker doctor --deep` publishes a topic in the stack's container and confirms a separate container on the same bridge network cannot see it. `walker doctor` is the executable form of this test and exits non-zero in CI. |
 | **M2** ✅ | **walkerd + walker skeleton** | **DONE 2026-09-21.** Dashboard renders with live link rates. Socket round-trip **0.064 ms median / 0.83 ms max** over 200 calls (budget was <1 ms). The `sim` unit starts (20 s to ready), runs, and stops in 1 s **leaving no orphans**, all through walkerd. The readiness probe names the failing layer when Gazebo is killed. Constraint matrix enforced from one table. `walker dump` renders a frame as text so the layout is testable in CI. |
-| **M3** | **World + drone selection** | `powerline` + `m4e` selected from the scan; a second world dropped into `worlds/` appears on `F5` and flies; the generated airframe file matches V1’s byte for byte in the m4e case |
+| **M3** ✅ | **World + drone selection** | **DONE 2026-09-22.** Full scan of models/worlds/bags/projects in **4.7 ms** (budget 200 ms). Worlds, Drones and Cameras pickers render and commit to walkerd. A second world (`flat`) written from scratch was scanned, selected and **flew** — no rebuild, no code change. Generated airframe vs V1's: see Appendix E — numerically identical, not byte-identical. |
 | **M4** | **Bridge always-on + full PSDK surface** | `ros2 topic list \| grep wrapper` shows all 41+5; `ros2 service list` shows 56; the rates in §13.1 are within ±20 % of the PDF; service introspection is on |
 | **M5** | **C++ projects + terminals + constraints** | `demo_orbit_mission` flies a clean 2-lap orbit and lands; starting a second project is refused with the right message; each unit opens its own ptyxis window; walker shows the project’s step transitions in its log pane |
 | **M6** | **Cameras + RViz + QGC + the guard** | all four boot profiles; **live on/off during a flight with the frame rate change visible in `gz stats`**; RViz shows every enabled camera; the new walker panel (§14.3) renders and its four actions work; QGC connects and flies manually; **and with a project running, QGC's arm / mode-change / mission-upload are demonstrably dropped by the guard, with telemetry still live** |
@@ -1557,6 +1557,62 @@ clipping helper; the dashboard degrades instead of dying.
 `walker dump` was added for the same reason: a curses layout cannot be checked
 by reading the code, and capturing a real terminal means re-implementing one.
 Asking curses itself what is on screen (`instr`) is exact and works in CI.
+
+---
+
+## Appendix E — M3: selection, and what the airframe comparison actually showed
+
+### The acceptance criterion was wrong as written
+
+The plan asked for the generated airframe to match V1's **byte for byte**. That
+is not achievable and should not be: the generated file carries a provenance
+header saying where it came from and that editing it is pointless. What matters
+is that the aircraft flies identically, so the comparison made was of the
+`param set-default` set, whitespace-normalised:
+
+| | V1 (baked into the image) | V2 (generated from `walker.toml`) |
+|---|---|---|
+| params | 33 | 34 |
+| differences | — | `-0.16500` vs `-0.165`, `0.60` vs `0.6` — the same numbers |
+| extra in V2 | — | `MIS_TAKEOFF_ALT 1.8` |
+
+`MIS_TAKEOFF_ALT` is not new behaviour: V1 set it at run time from
+`launch_sim.sh` with `px4-param set`. Moving it into the airframe puts it with
+the other 33 params, per drone, in one place — the whole point of the manifest.
+
+**Verdict: a superset of V1's, numerically identical where they overlap.**
+
+### Finding E-1 — a broken manifest was silently hiding the thing it described
+
+`scan.py` claimed to list broken entries rather than drop them. It did not. A
+drone whose `walker.toml` failed to parse returned an empty dict, so `kind`
+defaulted to `"scenery"`, so it vanished from the Drones screen — leaving you
+to wonder why the aircraft you just added is not listed. Precisely the failure
+the module's own docstring promised to avoid.
+
+Fixed: a manifest that fails to parse classifies as `broken`, and the Drones
+screen lists it with the parser's own complaint, line and column included.
+Something that tried to declare itself and failed is far more likely to be what
+you are looking for than scenery.
+
+### Finding E-2 — the composer tracebacked on the same input
+
+An unhandled `TOMLDecodeError` printed a stack whose most prominent line was a
+frame inside `compose_sim.py`, which reads as "the composer is broken" rather
+than "your manifest has a typo". It now names the file and quotes the parser.
+
+### The new world
+
+`worlds/flat.sdf` — bare ground, 2 km square, same origin as the corridor so
+coordinates mean the same thing in both and bags can be compared across them.
+It exists because the powerline world renders five towers and four catenary
+spans that a velocity controller has no opinion about; `flat` is what a
+mission's step machine, a climb controller, or CI should be tested against.
+
+Its header also documents the one mistake a new world is most likely to make:
+declaring system plugins. PX4's `server.config` already loads Physics, Sensors,
+Imu and the rest, and declaring them again in the world loads each twice —
+which applies forces twice and makes the drone spin on the spot.
 
 ---
 

@@ -183,6 +183,11 @@ class Daemon:
             "units": [u.snapshot() for u in self.units.values()],
             "selection": dict(self.selection),
             "flight_lock": constraints.flight_lock_holder(self.running()),
+            # walker greys out keys from THIS, rather than re-deriving the
+            # rules on the host: one table, enforced and displayed from the
+            # same place, so what the UI offers and what walkerd accepts can
+            # never disagree.
+            "editable": constraints.editable(self.running()),
             "composed": os.path.isfile(os.path.join(RUNTIME, "compose.json")),
         }
 
@@ -350,9 +355,21 @@ class Daemon:
         if op == "stop":
             return self.op_stop(req)
         if op == "select":
+            args = req.get("args", {}) or {}
+            running = self.running()
+            # Check EVERY requested change before applying ANY of them: a
+            # partially applied selection is worse than a refused one, because
+            # the screen then shows a mixture of what you asked for and what
+            # you had.
+            for k in args:
+                verdict = constraints.can_edit(k, running)
+                if not verdict.allowed:
+                    return {"ok": False, "error": "locked", "reason": verdict.reason,
+                            "held_by": verdict.held_by, "hint": verdict.hint,
+                            "setting": k}
             for k in ("drone", "world", "cameras", "qgc_video", "gui"):
-                if k in req.get("args", {}):
-                    self.selection[k] = req["args"][k]
+                if k in args:
+                    self.selection[k] = args[k]
             self.server.broadcast({"ev": "selection", **self.selection})
             return {"ok": True, "selection": dict(self.selection)}
         if op == "probe":

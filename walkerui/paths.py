@@ -102,6 +102,12 @@ MOUNTS: tuple[Mount, ...] = (
         "the RViz panel package, built on demand",
     ),
     Mount(
+        REPO / "simsupport",
+        f"{WORKSPACE}/src/simsupport",
+        "rw",
+        "the gimbal rig and sensor models that make the payload follow the aircraft",
+    ),
+    Mount(
         REPO / "tools",
         f"{WORKSPACE}/src/tools",
         "rw",

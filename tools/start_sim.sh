@@ -182,6 +182,39 @@ ros2 run ros_gz_bridge parameter_bridge --ros-args -p config_file:="$BRIDGE_YAML
 PIDS+=($!)
 sleep 2
 
+# ── 3b. the payload rig ──────────────────────────────────────────────────────
+# WITHOUT THESE THE PAYLOAD CAMERAS FILM THE WRONG PLACE.
+#
+# The gimbal is a SEPARATE Gazebo model, because gz's set_pose only sticks on a
+# top-level model and a stabilised gimbal therefore cannot be a link of the
+# drone. Nothing moves it by itself: the relay watches the aircraft's pose and
+# the stabiliser teleports the rig to follow it, 50 times a second.
+#
+# Skip them and the simulation looks completely healthy -- the drone flies, the
+# cameras render, frames arrive on the wrapper surface -- while every payload
+# image shows the patch of ground the aircraft took off from.
+#
+# Split into two processes on purpose: a busy gz-transport subscription and a
+# stream of gz-transport service requests starve each other in one process
+# (measured in V1: ~150 Hz alone, ~40% success when combined).
+SIMSUPPORT="$HOME/ws/src/simsupport"
+if [ -d "$SIMSUPPORT" ]; then
+    echo "[sim]     starting the gimbal pose relay + stabiliser"
+    python3 "$SIMSUPPORT/gimbal_pose_relay.py" &
+    PIDS+=($!)
+    sleep 1
+    python3 "$SIMSUPPORT/gimbal_stabilizer.py" &
+    PIDS+=($!)
+
+    # The LRF's noise model. The sensor's own <noise> block is removed in the
+    # model so this can shape returns the way the real rangefinder behaves.
+    python3 "$SIMSUPPORT/lrf_noise_model.py" &
+    PIDS+=($!)
+else
+    echo "[sim]     WARNING: $SIMSUPPORT is not mounted; the payload rig will" >&2
+    echo "[sim]     not follow the aircraft and payload images will be wrong." >&2
+fi
+
 # ── 4. PX4, in the foreground ────────────────────────────────────────────────
 # The parameter pokes that used to live in launch_sim.sh are gone: everything
 # they set (NAV_DLL_ACT, MIS_TAKEOFF_ALT, the performance envelope) is now in

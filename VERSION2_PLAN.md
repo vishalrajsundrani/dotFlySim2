@@ -1809,6 +1809,95 @@ is runnable immediately.
 
 ---
 
+## Appendix H — M6 part 1: the window, the optics, and when a setting may change
+
+### H-1 — the simulation had no window at all
+
+`start_sim.sh` defaulted to `SIM_HEADLESS=1`. Correct for CI, wrong for a
+person, and it went unnoticed because every development test passed
+`SIM_HEADLESS=1` explicitly. The default now follows the environment: a window
+when `DISPLAY` is set **and answers**, headless otherwise. The probe matters —
+`DISPLAY` can be set and unusable, and Gazebo's GUI then dies seconds later with
+an Ogre error long after the "starting" line scrolled past, so the simulation
+looks like it came up fine. `[g]` toggles it.
+
+### H-2 — every payload camera had the wrong field of view
+
+DJI publishes a **diagonal** FOV; Gazebo's `<horizontal_fov>` is horizontal. The
+model fed the quoted numbers straight in, so every lens saw a much wider scene
+than the real aircraft — which quietly invalidates anything measured through it:
+a detection's bearing, a pixel-to-metre scale, a photogrammetry overlap
+estimate.
+
+That the figures are diagonal is **checkable, not assumed**: each matches the
+diagonal FOV implied by its own quoted 35 mm-equivalent focal length.
+
+| lens | equiv f | DFOV quoted | DFOV from f | HFOV (4:3) | was | now |
+|---|---|---|---|---|---|---|
+| wide | 24 mm | 84.0° | 84.1° | **71.5°** | 84.0° | 71.5° |
+| medium tele | 70 mm | 35.0° | 34.3° | **28.3°** | 35.0° | 28.3° |
+| tele | 168 mm | 15.0° | 14.7° | **12.0°** | 15.0° | 12.0° |
+
+All tiers of a lens share its HFOV: the 16:9 video modes are a vertical crop of
+the same 4:3 sensor, so they keep full sensor width and Gazebo derives each
+tier's vertical FOV from the image aspect (wide 4K: 71.5° × 44.1°).
+
+The LRF's `update_rate` was also raised from 1 Hz to 25 Hz, which was the cause
+of `relative_obstacle_info` arriving at 1 Hz against the PDF's 25 (finding F-2's
+loose end).
+
+**Fisheye pair**, against the published spec — faithful in horizontal FOV (90°),
+image (704×704 mono8) and rate (20 Hz); **not** faithful in vertical FOV, since
+the real forward pair is 90°×135° and a square image cannot express that.
+Matching the published stream was judged more important than matching the lens.
+The 90 mm baseline is a plausible value for the airframe, not a measured one,
+and it is load-bearing for stereo depth — a node calibrated here must be
+recalibrated against the aircraft. Only the forward pair is modelled, because
+only the forward pair reaches the wrapper surface.
+
+### H-3 — the payload was filming the wrong place
+
+V1's `gimbal_pose_relay.py` and `gimbal_stabilizer.py` had not been ported. The
+payload is a **separate** Gazebo model (gz's `set_pose` only sticks on a
+top-level model, so a stabilised gimbal cannot be a link of the drone) and
+nothing was moving it — it sat at the world origin while the aircraft flew away.
+
+The simulation looks completely healthy in that state: the drone flies, the
+cameras render, frames arrive on the wrapper surface, and every payload image
+shows the patch of ground the aircraft took off from.
+
+Ported into `simsupport/`, parameterised from `compose.json` rather than
+hard-coded to `default`/`m4e_0`, and verified in flight — a constant 0.122 m
+nose-mount offset held through x, y and z while the aircraft climbed and
+orbited.
+
+### H-4 — when a setting may be changed
+
+The constraint table said what may RUN alongside what. It said nothing about
+what may be CHANGED, and when — so a setting read once at compose time could be
+edited freely under a running simulation and would appear to have been accepted
+while changing nothing. That is the failure mode this project keeps finding:
+**the interface says yes and the system does not change.**
+
+`constraints.SETTINGS` now classifies every setting:
+
+| setting | when | why |
+|---|---|---|
+| `world` | sim stopped | composed and symlinked into PX4's path at start |
+| `drone` | sim stopped | airframe and model generated at start; PX4 reads the airframe once, at boot |
+| `gui` | sim stopped | the Gazebo client starts alongside the server |
+| `qgc_video` | sim stopped | decides whether `GstCameraSystem` is written into the server config (Finding C2) |
+| `cameras` | **anytime** | subscription-driven — the SPIKE-1 capability |
+| `lens`, `tier` | sim running | nothing to switch between until the cameras exist |
+
+walkerd refuses a locked change with the reason and the way out, checking
+**every** requested change before applying any (a partly applied selection is
+worse than a refused one). walker greys the key out and shows `⨯ sim up`, so
+nobody presses it three times wondering whether the keyboard is broken. Both
+read the same table.
+
+---
+
 ## Appendix B — Decision log
 
 | Date | Decision | Effect |

@@ -144,3 +144,101 @@ def as_table() -> list[list[str]]:
                 row.append("ok")
         rows.append(row)
     return rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WHEN A SETTING MAY BE CHANGED
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The rules above say what may RUN alongside what. These say what may be
+# CHANGED, and when. They are a different question and they were missing: a
+# setting that is read once, when the simulation is composed, can be edited
+# freely while it runs and will appear to have been accepted while changing
+# nothing at all.
+#
+# That is the worst kind of failure this project keeps finding: the interface
+# says yes, and the system does not change. So each setting declares when it is
+# editable, walker greys out the key when it is not, and walkerd refuses the
+# change with the reason rather than accepting it quietly.
+#
+# THREE KINDS
+#
+#   COMPOSE TIME   read by tools/compose_sim.py when the simulation starts, so
+#                  changing it under a running simulation is meaningless until
+#                  the next start. Editable only while `sim` is stopped.
+#
+#   LIVE           takes effect immediately on a running simulation, and means
+#                  nothing without one. Editable only while `sim` runs.
+#
+#   ANYTIME        safe either way.
+
+ANYTIME = "anytime"
+SIM_STOPPED = "sim_stopped"
+SIM_RUNNING = "sim_running"
+
+
+@dataclass(frozen=True)
+class SettingRule:
+    name: str
+    when: str
+    what: str        # what the setting does, for the UI
+    reason: str      # why it is gated, in the operator's terms
+
+
+SETTINGS: tuple[SettingRule, ...] = (
+    SettingRule(
+        "world", SIM_STOPPED, "which world to fly in",
+        "the world is composed and symlinked into PX4's path when the "
+        "simulation starts; changing it now would change nothing until it is "
+        "restarted"),
+    SettingRule(
+        "drone", SIM_STOPPED, "which aircraft to fly",
+        "the airframe file and the model are generated from the drone's "
+        "manifest at start, and PX4 reads the airframe once, at boot"),
+    SettingRule(
+        "gui", SIM_STOPPED, "open a Gazebo window",
+        "the Gazebo client is started alongside the server; a running "
+        "simulation already has a window or does not"),
+    SettingRule(
+        "qgc_video", SIM_STOPPED, "load the video plugin for QGC",
+        "GstCameraSystem is written into the gz server config at compose "
+        "time, and loading it later is not possible. It also holds camera "
+        "subscriptions open, which is why it is not simply always on"),
+    SettingRule(
+        # The headline capability of V2: proved in SPIKE-1, where a camera
+        # group switched on mid-flight took CPU from 18.8% to 106% and back.
+        "cameras", ANYTIME, "which camera groups stream",
+        "camera groups are subscription-driven, so they can be switched during "
+        "a flight as well as before one"),
+    SettingRule(
+        "lens", SIM_RUNNING, "which payload lens feeds the stream",
+        "there is nothing to switch between until the cameras exist"),
+    SettingRule(
+        "tier", SIM_RUNNING, "photo, 4K, FHD or preview",
+        "there is nothing to switch between until the cameras exist"),
+)
+
+_BY_NAME = {r.name: r for r in SETTINGS}
+
+
+def can_edit(setting: str, running: set[str]) -> Verdict:
+    """May `setting` be changed right now?"""
+    rule = _BY_NAME.get(setting)
+    if rule is None:
+        # Unknown settings are allowed: refusing something this table has not
+        # heard of would make adding one a two-file change.
+        return Verdict(True)
+
+    sim_up = "sim" in running
+    if rule.when == SIM_STOPPED and sim_up:
+        return Verdict(False, rule.reason, "sim",
+                       "stop the simulation first (s), then change it")
+    if rule.when == SIM_RUNNING and not sim_up:
+        return Verdict(False, rule.reason, "",
+                       "start the simulation first (s)")
+    return Verdict(True)
+
+
+def editable(running: set[str]) -> dict[str, bool]:
+    """{setting: may be changed now} -- what walker greys out."""
+    return {r.name: can_edit(r.name, running).allowed for r in SETTINGS}

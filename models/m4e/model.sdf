@@ -245,6 +245,41 @@
              square sensor so vfov = hfov, fy = fx; cx = w/2, cy = h/2
            Rendering is demand-driven: both rows in config/bridge.yaml are
            lazy, so with no subscriber gz renders neither camera. -->
+      <!-- ===================================================================
+           THE FORWARD VISION PAIR, against the real aircraft's spec.
+
+           The M4E carries SIX low-light fisheye lenses giving omnidirectional
+           binocular vision. Only the FORWARD pair is modelled, because only
+           the forward pair reaches the wrapper surface: psdk_ros2 publishes
+           perception_stereo_left_stream and perception_stereo_right_stream and
+           nothing else. Modelling the other four would cost GPU time that no
+           topic would ever carry.
+
+           FAITHFUL HERE
+             horizontal FOV   90 degrees, matching the published figure
+             image            704x704 mono8, matching what the wrapper streams
+             rate             20 Hz, matching the observed stream rate
+
+           NOT FAITHFUL, AND WHY
+             vertical FOV     the real forward pair is 90 H by 135 V. A square
+                              704x704 image cannot express that: Gazebo derives
+                              vertical FOV from the image aspect, so this pair
+                              sees 90 by 90. Matching the published 704x704
+                              stream was judged more important than matching
+                              the lens, since a consumer sees the stream.
+             range            the real system measures 0.4 to 200 m forward.
+                              A camera pair in Gazebo has no such limit; a
+                              perception node that assumes one must impose it.
+
+           Baseline: 90 mm (pose y = +/-0.045), mounted 0.30 m forward of the
+           body origin on the nose. DJI does not publish the baseline, so this
+           is a plausible value for the airframe rather than a measured one,
+           and it IS load bearing: stereo depth scales with it, so a node
+           calibrated against this simulation must be recalibrated against the
+           aircraft.
+
+           Source: DJI Matrice 4 Series specifications, enterprise.dji.com
+           =================================================================== -->
       <sensor name="perception_front_left" type="camera">
         <pose>0.30 0.045 0 0 0 0</pose>
         <always_on>true</always_on>

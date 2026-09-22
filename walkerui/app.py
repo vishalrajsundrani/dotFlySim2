@@ -60,6 +60,7 @@ class App:
         self.status = ""
         self.status_until = 0.0
         self.links: list[dict] = []
+        self.editable: dict = {}
         self.busy: set[str] = set()
         # The picker overlays the dashboard rather than replacing the app's
         # state, so events keep arriving and the simulation keeps running
@@ -128,6 +129,7 @@ class App:
             with self._lock:
                 self.units = {u["name"]: u for u in st["units"]}
                 self.selection = st.get("selection", {})
+                self.editable = st.get("editable", {})
             pr = self.c.probe()
             with self._lock:
                 self.links = pr.get("links", [])
@@ -162,6 +164,18 @@ class App:
             pass
 
     # ── the picker ───────────────────────────────────────────────────────────
+
+    def _locked(self, setting: str) -> bool:
+        """True (and says so) when this setting cannot be changed right now."""
+        if self.editable.get(setting, True):
+            return False
+        sim = self.units.get("sim", {}).get("state", "stopped")
+        if sim in ("running", "starting"):
+            self.say(f"{setting} is fixed while the simulation runs — "
+                     f"it is read when the simulation is composed. Stop it (s) first.", 10)
+        else:
+            self.say(f"{setting} needs a running simulation (s)", 8)
+        return True
 
     def open_picker(self, kind: str) -> None:
         """
@@ -297,9 +311,20 @@ class App:
             ("CAMERAS", "c", sel.get("cameras", "-")),
             ("WINDOW", "g", "gazebo window" if sel.get("gui", True) else "headless"),
         ):
+            setting = {"WORLD": "world", "DRONE": "drone",
+                       "CAMERAS": "cameras", "WINDOW": "gui"}[label]
+            # `editable` comes from walkerd, which is also what enforces it.
+            can = self.editable.get(setting, True)
             self.put(row, 2, label, curses.color_pair(C_DIM))
-            self.put(row, 12, str(value)[:28], curses.A_BOLD)
-            self._key(row, w - 14, key, "change")
+            self.put(row, 12, str(value)[:28],
+                     curses.A_BOLD if can else curses.color_pair(C_DIM))
+            if can:
+                self._key(row, w - 14, key, "change")
+            else:
+                # A locked setting shows WHY at a glance, so nobody presses the
+                # key three times wondering if the keyboard is broken.
+                self.put(row, w - 14, "  ⨯ ", curses.color_pair(C_DIM))
+                self.put(row, w - 10, "sim up", curses.color_pair(C_DIM))
             row += 1
 
         row += 1
@@ -405,12 +430,17 @@ class App:
             self.say("keys: s sim · w world · d drone · c cameras · g window · "
                      "F5 rescan · P probe · t terminal · Q quit", 10)
         elif k == "w":
-            self.open_picker("world")
+            if not self._locked("world"):
+                self.open_picker("world")
         elif k == "d":
-            self.open_picker("drone")
+            if not self._locked("drone"):
+                self.open_picker("drone")
         elif k == "c":
-            self.open_picker("cameras")
+            if not self._locked("cameras"):
+                self.open_picker("cameras")
         elif k == "g":
+            if self._locked("gui"):
+                return
             want = not self.selection.get("gui", True)
 
             def go():

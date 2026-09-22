@@ -1,0 +1,81 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+      Splitter Ratio: 0.5
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 5
+      Plane Cell Count: 40
+      Color: 100; 100; 100
+      Alpha: 0.4
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Marker Scale: 2
+      Show Names: true
+    # ---------------------------------------------------------------------
+    # EVERY IMAGE DISPLAY IS BEST EFFORT, AND THAT IS NOT OPTIONAL.
+    #
+    # Image streams are published with SensorDataQoS (best effort). A RELIABLE
+    # subscriber never matches them, and RViz then shows an empty panel with no
+    # error at all -- the single most common "the cameras are broken" report,
+    # when the cameras are fine. See finding D-4.
+    # ---------------------------------------------------------------------
+    - Class: rviz_default_plugins/Image
+      Name: main_camera_stream
+      Enabled: true
+      Topic:
+        Value: /wrapper/psdk_ros2/main_camera_stream
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/Image
+      Name: perception_stereo_left
+      Enabled: true
+      Topic:
+        Value: /wrapper/psdk_ros2/perception_stereo_left_stream
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/Image
+      Name: perception_stereo_right
+      Enabled: true
+      Topic:
+        Value: /wrapper/psdk_ros2/perception_stereo_right_stream
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: psdk_map_enu
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 40
+      Pitch: 0.5
+      Yaw: 0.8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Current View
+      Target Frame: <Fixed Frame>
+Window Geometry:
+  Height: 900
+  Width: 1400
+  Displays:
+    collapsed: false

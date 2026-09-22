@@ -755,6 +755,13 @@ def _apply_v2_surface_policy(routes: List[TopicRoute]) -> List[TopicRoute]:
     for route in routes:
         if route.group == "mirror":
             continue
+        # The *_in video routes are mirrors by another name: they carry a
+        # Manifold's camera stream into /manifold/<name> for the simulation to
+        # look at. Nothing publishes those wrapper topics in V2, so they would
+        # subscribe to silence -- and, worse, make the wrapper topic appear in
+        # the graph with a subscriber and no publisher, which reads as "handled".
+        if str(getattr(route, "sim_topic", "")).startswith("/manifold/"):
+            continue
         if route.group != "video":
             route.enabled = True
             # THE RATE CAPS MEASURED A CONSTRAINT THAT NO LONGER EXISTS.

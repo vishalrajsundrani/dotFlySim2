@@ -1247,7 +1247,7 @@ acceptance test passes.
 | **M3** ✅ | **World + drone selection** | **DONE 2026-09-22.** Full scan of models/worlds/bags/projects in **4.7 ms** (budget 200 ms). Worlds, Drones and Cameras pickers render and commit to walkerd. A second world (`flat`) written from scratch was scanned, selected and **flew** — no rebuild, no code change. Generated airframe vs V1's: see Appendix E — numerically identical, not byte-identical. |
 | **M4** 🔶 | **Bridge always-on + full PSDK surface** | **Substantially done 2026-09-22.** ✅ Bridge is a walkerd unit, up with the simulation. ✅ **56/56 services (100%)** with service introspection on (59 `_service_event` topics). ✅ 90/102 of the surface live, **0 unexpectedly absent**. ✅ 11/19 measurable rates within ±20% of the PDF (was 3). ⬜ Remaining: 8 source-limited rates need periodic republish; 7 telemetry topics need converters V1 never had. See Appendix F. |
 | **M5** ✅ | **C++ projects + terminals + constraints** | **DONE 2026-09-22.** `demo_orbit_mission` flies authority → takeoff → climb → a clean orbit → land → release, **exits 0 by itself**, and frees the flight lock. A second project is refused by name with the way out. `walker-attach` gives a live PX4 console in its own ptyxis window. Step transitions appear in walker's log pane. See Appendix G. |
-| **M6** | **Cameras + RViz + QGC + the guard** | all four boot profiles; **live on/off during a flight with the frame rate change visible in `gz stats`**; RViz shows every enabled camera; the new walker panel (§14.3) renders and its four actions work; QGC connects and flies manually; **and with a project running, QGC's arm / mode-change / mission-upload are demonstrably dropped by the guard, with telemetry still live** |
+| **M6** 🔶 | **Cameras + RViz + QGC + the guard** | **Mostly done 2026-09-23.** ✅ Live camera toggling **measured through walker**: 41.9% → 101.2% (fisheye) → 41.9%, and 58.4% (payload wide FHD) → 41.3%, mid-flight, no restart. ✅ Camera intrinsics corrected against DJI's published specs (Appendix H). ✅ RViz unit with best-effort image displays, real window. ✅ **MAVLink guard proven**: with a mission flying, QGC's COMMAND_LONG and SET_MODE are dropped while 171 telemetry datagrams keep flowing; the lock releases when the mission ends. ⬜ Remaining: the walker RViz panel (D6), and QGC flown manually end to end. |
 | **M7** | **rosbag record + replay** | record during a project; record during a replay; named bag lands in `bags/`; `ros2 bag info` is clean; fly-back replay re-flies the recorded orbit; passive replay drives RViz with no simulation running |
 | **M8** | **Documentation** | the three files, reviewed against the built system, every command in them executed once |
 | **M9** | **`demo_gnss_stereo_inertial` port — committed (D5)**, plus `simty.mock` as a test fixture and a CI smoke test | the SLAM project builds and runs on the `fisheye` profile, consuming `perception_stereo_{left,right}_stream` + `camera_info`, and its trajectory error against ground truth is reported; headless orbit flight in CI producing a bag |
@@ -1895,6 +1895,82 @@ walkerd refuses a locked change with the reason and the way out, checking
 worse than a refused one). walker greys the key out and shows `⨯ sim up`, so
 nobody presses it three times wondering whether the keyboard is broken. Both
 read the same table.
+
+---
+
+## Appendix I — M6 part 2: cameras on demand, and a lock that is real
+
+### Live camera switching, measured end to end
+
+SPIKE-1 established the mechanism; this is the capability, driven from walker
+on a running simulation:
+
+| phase | gz server CPU |
+|---|---|
+| all camera groups off | 41.9 % |
+| **fisheye on** | **101.2 %** |
+| off again | 42.0 % |
+| **payload on (wide, FHD)** | **58.4 %** |
+| off again | 41.3 % |
+
+Nothing restarts. A group goes on by making something subscribe and off by
+making it stop; Gazebo follows within a sensor period. The chain is
+`always_on=false` in the SDF → `lazy:true` in ros_gz_bridge → the bridge's video
+route, with `camera_switcher` holding exactly one payload lens at a time.
+
+`tools/gz_cpu.sh` is kept as a tool because rendering cost is the **only**
+honest way to tell a camera that is genuinely off from one that is merely not
+being looked at — topic rates cannot distinguish them, since an unsubscribed
+sensor publishes nothing either way.
+
+### I-1 — the MAVLink guard (decision D4, delivered)
+
+You asked for a lock rather than a warning, and a warning is not a lock: an
+operator who clicks Disarm mid-mission gets a disarmed aircraft whatever the
+banner said. So PX4's GCS link points at the guard, always:
+
+```
+                telemetry, always
+    PX4 :14541  ───────────────────────────────►  QGC :14550
+                ◄───────────────────────────────
+                  commands, only while unlocked
+```
+
+Measured with a mission flying:
+
+```
+flight lock: project        guard locked: True (holder=project)
+QGC commands BLOCKED:       {'COMMAND_LONG': 5, 'SET_MODE': 5}
+telemetry still flowing:    171 more datagrams to QGC
+after the mission stops:    lock released, 0 further blocks
+```
+
+Fifteen message ids are blocked while locked — arm/disarm/takeoff/RTL
+(`COMMAND_LONG`/`COMMAND_INT`), `SET_MODE`, joystick and RC override, the
+offboard setpoint messages, the mission **write** side, and `PARAM_SET`.
+Mission *reads* pass, so QGC can still display the current plan.
+
+Three decisions worth stating:
+
+* **The guard is always in the path**, even unlocked. Inserting a relay only
+  when needed means re-pointing PX4's MAVLink instance mid-flight, which drops
+  the ground-station link at the exact moment someone is most likely watching
+  it.
+* **Frames are forwarded byte for byte.** The only decision is forward-or-drop,
+  on the message id; nothing is re-encoded, so v2 signing, sequence numbers and
+  CRCs are untouched. A relay that rewrote frames would have to re-sign them.
+* **The lock follows the flight lock on a 1 Hz watch**, not only on start and
+  stop — because a mission that exits by itself (G-2) must release QGC just as
+  surely as one that is stopped from the dashboard. A lock released only on the
+  tidy path is a lock that eventually sticks.
+
+### I-2 — RViz image displays are best-effort, and that is not optional
+
+`config/rviz/flight.rviz` sets `Reliability Policy: Best Effort` on every image
+display. Image streams are published with `SensorDataQoS`; a reliable subscriber
+never matches them and RViz then shows an empty panel **with no error at all**.
+That is the most common "the cameras are broken" report in a project like this,
+and the cameras are fine. Finding D-4, third form.
 
 ---
 

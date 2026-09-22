@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import constraints                      # noqa: E402
 import probes                           # noqa: E402
 import projects                         # noqa: E402
+from mavguard import MavGuard           # noqa: E402
 from rosnode import RosWatcher          # noqa: E402
 from server import Server               # noqa: E402
 from units import (FAILED, LogRule, RUNNING, STARTING, Unit, UnitSpec)  # noqa: E402
@@ -45,6 +46,17 @@ HOME = os.path.expanduser("~")
 WS = os.path.join(HOME, "ws")
 TOOLS = os.path.join(WS, "src", "tools")
 BRIDGE = os.path.join(WS, "src", "bridge")
+SIMSUPPORT = os.path.join(WS, "src", "simsupport")
+
+# Which bridge routes carry each camera group onto the wrapper surface.
+# Enabling a route makes the bridge SUBSCRIBE, which makes ros_gz_bridge
+# subscribe (lazy:true), which makes Gazebo render the sensor (always_on=false).
+# That chain is the whole reason a camera group can be switched mid-flight --
+# see SPIKE-1.
+CAMERA_ROUTES = {
+    "fisheye": ("stereo_left_out", "stereo_right_out"),
+    "payload": ("main_camera_out",),
+}
 RUNTIME = os.path.join(HOME, "gz_runtime")
 SOCKET = os.environ.get("WALKERD_SOCKET", "/run/walker/walkerd.sock")
 
@@ -95,6 +107,8 @@ class Daemon:
         global WATCH
         self.watch = RosWatcher()
         WATCH = self.watch
+        # Always in PX4's MAVLink path; the lock only changes what it forwards.
+        self.guard = MavGuard()
         self.units: dict[str, Unit] = {}
         self.server = Server(SOCKET, self.handle)
         self.selection = {"drone": "m4e", "world": "powerline",
@@ -173,7 +187,69 @@ class Daemon:
             ],
         ))
 
+        add(UnitSpec(
+            name="cameras",
+            argv=["/bin/bash", "-c",
+                  "set +u; source /opt/ros/jazzy/setup.bash; "
+                  f"source {WS}/install/setup.bash 2>/dev/null; "
+                  f"exec python3 -u {SIMSUPPORT}/camera_switcher.py"],
+            cwd=SIMSUPPORT,
+            ready=None,
+            stop_signal=signal.SIGINT,
+            stop_timeout=10.0,
+            description="payload lens selector: holds exactly one camera subscription",
+            log_rules=[LogRule(r"lens|mode|zoom|active", "info")],
+        ))
+
+        add(UnitSpec(
+            name="rviz",
+            argv=["/bin/bash", "-c",
+                  "set +u; source /opt/ros/jazzy/setup.bash; "
+                  f"source {WS}/install/setup.bash 2>/dev/null; "
+                  f"exec rviz2 -d {WS}/config/rviz/flight.rviz"],
+            cwd=HOME,
+            ready=None,
+            stop_signal=signal.SIGTERM,
+            stop_timeout=12.0,
+            description="RViz: TF, odometry, obstacle markers and any enabled camera",
+            log_rules=[LogRule(r"error|Error|failed", "warn")],
+        ))
+
+        add(UnitSpec(
+            name="qgc",
+            argv=["/bin/bash", "-c",
+                  "cd $HOME && exec ./QGroundControl-x86_64.AppImage "
+                  "--appimage-extract-and-run"],
+            cwd=HOME,
+            env={"APPIMAGE_EXTRACT_AND_RUN": "1"},
+            ready=None,
+            stop_signal=signal.SIGTERM,
+            stop_timeout=15.0,
+            description="QGroundControl on MAVLink UDP 14550, behind the guard",
+            log_rules=[LogRule(r"error|Error|failed|Connected", "info")],
+        ))
+
     # ── state ────────────────────────────────────────────────────────────────
+
+    def _sync_flight_lock(self) -> None:
+        """
+        Keep the MAVLink guard in step with who holds the flight lock.
+
+        Called after every unit transition rather than only at start and stop,
+        so a mission that EXITS ON ITS OWN releases QGC as surely as one that
+        is stopped from the dashboard. A lock that is only released on the
+        tidy path is a lock that eventually sticks.
+        """
+        holder = constraints.flight_lock_holder(self.running())
+        was = self.guard.locked
+        self.guard.set_locked(holder is not None, holder or "")
+        if bool(holder) != was:
+            self.server.broadcast({
+                "ev": "log", "unit": "qgc", "level": "warn" if holder else "info",
+                "t": time.time(),
+                "text": (f"QGC is now an OBSERVER: {holder} holds the flight lock"
+                         if holder else
+                         "QGC has full control again: nothing holds the flight lock")})
 
     def running(self) -> set[str]:
         return {n for n, u in self.units.items() if u.state in (RUNNING, STARTING)}
@@ -188,6 +264,7 @@ class Daemon:
             # same place, so what the UI offers and what walkerd accepts can
             # never disagree.
             "editable": constraints.editable(self.running()),
+            "guard": self.guard.status(),
             "composed": os.path.isfile(os.path.join(RUNTIME, "compose.json")),
         }
 
@@ -310,6 +387,62 @@ class Daemon:
                                "text": f"bridge in project mode, setpoint={setpoint}"})
         return ""
 
+    def op_cameras(self, args: dict) -> dict:
+        """
+        Switch camera groups, lens and tier -- live, during a flight.
+
+        Nothing here restarts anything. A group goes on by making something
+        subscribe and off by making it stop; Gazebo follows within a sensor
+        period. This is the capability SPIKE-1 established: measured, a group
+        switched on took the simulation from 18.8% CPU to 106% and back again.
+        """
+        verdict = constraints.can_edit("cameras", self.running())
+        if not verdict.allowed:
+            return {"ok": False, "error": "locked", "reason": verdict.reason,
+                    "hint": verdict.hint}
+        if "sim" not in self.running():
+            return {"ok": False, "error": "no simulation",
+                    "reason": "there are no cameras until the simulation runs",
+                    "hint": "start the simulation first (s)"}
+
+        profile = args.get("profile")
+        if profile:
+            if profile not in ("none", "fisheye", "payload", "all"):
+                return {"ok": False, "error": "bad profile", "reason": profile}
+            wanted = {"fisheye": profile in ("fisheye", "all"),
+                      "payload": profile in ("payload", "all")}
+            self.selection["cameras"] = profile
+        else:
+            wanted = {g: bool(args[g]) for g in ("fisheye", "payload") if g in args}
+
+        acted = []
+        for group, on in wanted.items():
+            for key in CAMERA_ROUTES[group]:
+                self.watch.send_control(f"enable route={key} value={1 if on else 0}")
+            if group == "payload":
+                # The switcher is what actually holds a lens subscription, so
+                # the payload group is only really off once it has stopped.
+                unit = self.units["cameras"]
+                if on and unit.state not in (RUNNING, STARTING):
+                    unit.start()
+                elif not on and unit.alive:
+                    threading.Thread(target=unit.stop, daemon=True).start()
+            acted.append(f"{group} {'on' if on else 'off'}")
+
+        # Lens and tier go through the bridge's own camera verb, which
+        # publishes onto the switcher's command topics.
+        if args.get("lens"):
+            self.watch.send_control(f"camera lens={args['lens']}")
+            acted.append(f"lens {args['lens']}")
+        if args.get("tier"):
+            self.watch.send_control(f"camera mode={args['tier']}")
+            acted.append(f"tier {args['tier']}")
+
+        self.server.broadcast({"ev": "selection", **self.selection})
+        self.server.broadcast({"ev": "log", "unit": "cameras", "level": "info",
+                               "t": time.time(), "text": "cameras: " + ", ".join(acted)})
+        return {"ok": True, "applied": acted}
+
     def op_stop(self, req: dict) -> dict:
         name = req.get("unit", "")
         unit = self.units.get(name)
@@ -379,6 +512,8 @@ class Daemon:
                     "processes": probes.process_links(),
                     "links": self.watch.links(wrapper=req.get("wrapper", True)),
                     "watcher_error": self.watch.error}
+        if op == "cameras":
+            return self.op_cameras(req.get("args", {}) or {})
         if op == "projects":
             return {"ok": True, "projects": projects.listing()}
         if op == "build":
@@ -434,12 +569,25 @@ class Daemon:
             if u.alive:
                 u.stop()
         self.watch.stop()
+        self.guard.stop()
         self.server.stop()
         os._exit(0)
 
     def run(self) -> int:
         self.watch.start()
+        self.guard.start()
         self.server.start()
+
+        # The guard must track the flight lock even when nothing calls
+        # start/stop -- a mission that ends by itself is the common case.
+        def lock_watch():
+            while True:
+                try:
+                    self._sync_flight_lock()
+                except Exception:
+                    pass
+                time.sleep(1.0)
+        threading.Thread(target=lock_watch, daemon=True, name="flightlock").start()
         print(f"walkerd: listening on {SOCKET}", flush=True)
         print(f"walkerd: units: {', '.join(self.units)}", flush=True)
 

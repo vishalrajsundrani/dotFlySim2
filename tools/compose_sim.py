@@ -298,8 +298,22 @@ def write_airframe(out: str, drone: str, man: dict) -> tuple[str, int]:
     #
     # NOTE it targets the MAVLINK GUARD's port, not QGC's, when one is in use --
     # walkerd rewrites this line when it starts the guard (§16.2).
+    # PX4's GCS link points at the MAVLINK GUARD (14551), not at QGC (14550).
+    #
+    # The guard is always in the path, even when nothing is locked, because a
+    # relay that is inserted only when needed has to be inserted while the
+    # aircraft is flying -- and re-pointing PX4's MAVLink instance mid-flight
+    # means dropping the link to the ground station at the exact moment
+    # somebody is most likely to be looking at it.
+    #
+    # Unlocked, it forwards both ways verbatim. Locked, it drops QGC's command
+    # traffic and keeps its telemetry. See walkerd/mavguard.py.
+    #
+    # The explicit -t 127.0.0.1 remains necessary: px4-rc.mavlink relies on UDP
+    # broadcast for a GCS to find PX4, and Linux loopback does not forward
+    # broadcast, so QGC on the same machine never hears the heartbeat.
     with open(path + ".post", "w", encoding="utf-8") as fh:
-        fh.write("\nmavlink start -x -u 14541 -r 4000000 -t 127.0.0.1 -o 14550 -f\n")
+        fh.write("\nmavlink start -x -u 14541 -r 4000000 -t 127.0.0.1 -o 14551 -f\n")
     return path, aid
 
 

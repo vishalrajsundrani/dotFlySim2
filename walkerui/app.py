@@ -232,15 +232,33 @@ class App:
 
         sim_state = self.units.get("sim", {}).get("state", "stopped")
 
+        live_sim = sim_state in ("running", "starting")
+
         def go():
-            self.c.select(**{field: entry.name})
+            # CAMERAS APPLY IMMEDIATELY; everything else is read when the
+            # simulation is composed. That difference is the whole point of
+            # subscription-driven rendering, and hiding it would make the two
+            # cases look alike when they behave nothing alike.
+            if field == "cameras" and live_sim:
+                r = self.c.call("cameras", args={"profile": entry.name})
+                if r.get("ok"):
+                    with self._lock:
+                        self.selection["cameras"] = entry.name
+                    self.say("cameras: " + ", ".join(r.get("applied", [])), 6)
+                else:
+                    self.say(f"cameras: {r.get('reason','?')}  [{r.get('hint','')}]", 10)
+                return
+
+            r = self.c.select(**{field: entry.name})
+            if not r.get("ok"):
+                # walkerd owns the gating rules; a refusal is shown verbatim
+                # rather than second-guessed here.
+                self.say(f"{field} is locked: {r.get('reason','?')}  "
+                         f"[{r.get('hint','')}]", 12)
+                return
             with self._lock:
                 self.selection[field] = entry.name
-            if sim_state in ("running", "starting"):
-                # Honest about what a selection does and does not do: the
-                # composition is built when the simulation STARTS, so changing
-                # the drone or world under a running one changes nothing until
-                # it is restarted. V1 had the same property and did not say so.
+            if live_sim:
                 self.say(f"{field} = {entry.name} — restart the sim (s) for it "
                          f"to take effect", 12)
             else:

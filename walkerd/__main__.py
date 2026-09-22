@@ -34,6 +34,7 @@ from units import (FAILED, LogRule, RUNNING, STARTING, Unit, UnitSpec)  # noqa: 
 HOME = os.path.expanduser("~")
 WS = os.path.join(HOME, "ws")
 TOOLS = os.path.join(WS, "src", "tools")
+BRIDGE = os.path.join(WS, "src", "bridge")
 RUNTIME = os.path.join(HOME, "gz_runtime")
 SOCKET = os.environ.get("WALKERD_SOCKET", "/run/walker/walkerd.sock")
 
@@ -64,6 +65,19 @@ def _sim_ready() -> bool:
     # Read the persistent watcher's counters -- no new participant, no
     # discovery delay, no repeated rclpy init. See rosnode.py.
     return bool(WATCH and WATCH.ready(("clock", "imu")))
+
+
+def _bridge_ready() -> bool:
+    """
+    The bridge is ready when the WRAPPER SURFACE is live, not when its process
+    is. Those are far apart in time: the process starts in under a second and
+    then spends several building ~46 routes and 56 service servers, and a
+    project that starts in between finds half a surface.
+
+    flight_status is the right thing to wait on because it is what every
+    mission's first step blocks on.
+    """
+    return bool(WATCH and WATCH.ready(("w_status",)))
 
 
 class Daemon:
@@ -99,6 +113,25 @@ class Daemon:
                 LogRule(r"SYS_AUTOSTART|gz_bridge.*model:", "info"),
                 LogRule(r"Preflight Fail|ERROR|Unknown model", "warn"),
                 LogRule(r"\[commander\].*(Takeoff|Landing|Armed|Disarmed)", "info"),
+            ],
+        ))
+
+        add(UnitSpec(
+            name="bridge",
+            argv=["python3", "-B", os.path.join(BRIDGE, "ROS_Bridge_Simty.py")],
+            cwd=BRIDGE,
+            ready=_bridge_ready,
+            ready_timeout=120.0,
+            # SIGINT: the bridge tears its endpoints down and says so. Killed,
+            # it leaves the wrapper names on the graph for a few seconds and
+            # the next start races its own corpse.
+            stop_signal=signal.SIGINT,
+            stop_timeout=20.0,
+            description="PSDK wrapper surface: 41 telemetry + 5 command topics, 56 services",
+            log_rules=[
+                LogRule(r"^\[simty\]!", "warn"),
+                LogRule(r"serving /wrapper|shutting down", "info"),
+                LogRule(r"surface:|routes|services", "info"),
             ],
         ))
 

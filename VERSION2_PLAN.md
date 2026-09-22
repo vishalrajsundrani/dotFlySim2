@@ -1245,7 +1245,7 @@ acceptance test passes.
 | **M1** ✅ | **Image + container + mounts** | **DONE 2026-09-21.** `docker build` succeeds; `./walker up` starts the container; all 10 mounts present and writable (checked from inside); isolation **proved**, not asserted — `walker doctor --deep` publishes a topic in the stack's container and confirms a separate container on the same bridge network cannot see it. `walker doctor` is the executable form of this test and exits non-zero in CI. |
 | **M2** ✅ | **walkerd + walker skeleton** | **DONE 2026-09-21.** Dashboard renders with live link rates. Socket round-trip **0.064 ms median / 0.83 ms max** over 200 calls (budget was <1 ms). The `sim` unit starts (20 s to ready), runs, and stops in 1 s **leaving no orphans**, all through walkerd. The readiness probe names the failing layer when Gazebo is killed. Constraint matrix enforced from one table. `walker dump` renders a frame as text so the layout is testable in CI. |
 | **M3** ✅ | **World + drone selection** | **DONE 2026-09-22.** Full scan of models/worlds/bags/projects in **4.7 ms** (budget 200 ms). Worlds, Drones and Cameras pickers render and commit to walkerd. A second world (`flat`) written from scratch was scanned, selected and **flew** — no rebuild, no code change. Generated airframe vs V1's: see Appendix E — numerically identical, not byte-identical. |
-| **M4** | **Bridge always-on + full PSDK surface** | `ros2 topic list \| grep wrapper` shows all 41+5; `ros2 service list` shows 56; the rates in §13.1 are within ±20 % of the PDF; service introspection is on |
+| **M4** 🔶 | **Bridge always-on + full PSDK surface** | **Substantially done 2026-09-22.** ✅ Bridge is a walkerd unit, up with the simulation. ✅ **56/56 services (100%)** with service introspection on (59 `_service_event` topics). ✅ 90/102 of the surface live, **0 unexpectedly absent**. ✅ 11/19 measurable rates within ±20% of the PDF (was 3). ⬜ Remaining: 8 source-limited rates need periodic republish; 7 telemetry topics need converters V1 never had. See Appendix F. |
 | **M5** | **C++ projects + terminals + constraints** | `demo_orbit_mission` flies a clean 2-lap orbit and lands; starting a second project is refused with the right message; each unit opens its own ptyxis window; walker shows the project’s step transitions in its log pane |
 | **M6** | **Cameras + RViz + QGC + the guard** | all four boot profiles; **live on/off during a flight with the frame rate change visible in `gz stats`**; RViz shows every enabled camera; the new walker panel (§14.3) renders and its four actions work; QGC connects and flies manually; **and with a project running, QGC's arm / mode-change / mission-upload are demonstrably dropped by the guard, with telemetry still live** |
 | **M7** | **rosbag record + replay** | record during a project; record during a replay; named bag lands in `bags/`; `ros2 bag info` is clean; fly-back replay re-flies the recorded orbit; passive replay drives RViz with no simulation running |
@@ -1613,6 +1613,107 @@ Its header also documents the one mistake a new world is most likely to make:
 declaring system plugins. PX4's `server.config` already loads Physics, Sensors,
 Imu and the rest, and declaring them again in the world loads each twice —
 which applies forces twice and makes the drone spin on the spot.
+
+---
+
+## Appendix F — M4: the bridge, and what the surface really looks like
+
+### What came across
+
+`gui/simty/` → `bridge/simty/`, with the Manifold machinery removed:
+
+| removed | lines | why |
+|---|---|---|
+| `tui.py` | 2 042 | walker is the operator surface now |
+| `mock.py` | 456 | a synthetic Manifold to talk to |
+| `remote.py` | 353 | started the real wrapper over SSH |
+| `provision.py` | 347 | escalation policy between those |
+| `standin.py` | 291 | service stubs for what we did not serve |
+| **total** | **3 489** | ~35% of the bridge, with no loss of simulated behaviour |
+
+`discovery.py` survived but was reframed. It used to ask "is the Manifold
+there?"; it now asks **"is the wrapper surface up, and is it only ours?"** —
+`SurfaceState.QUIET / OURS / FOREIGN`. That is not a cosmetic rename: FOREIGN
+is the two-writers condition, which in V2 means a bag replay has started
+publishing over the bridge, and it is invisible from inside a mission.
+
+### Finding F-1 — V1's defaults were inverted for V2
+
+71 topic routes existed and only **26 were enabled**. That was correct in V1: a
+real Manifold published those wrapper topics, so the bridge had to stay off
+them. With no Manifold the bridge is the only possible publisher, and a route
+left off is simply a topic a mission waits on forever.
+
+The V2 policy (`_apply_v2_surface_policy`) inverts the default: everything on
+except video, which stays opt-in because 6 MB a frame is a real constraint. The
+24 `mirror_*` routes are **deleted** rather than disabled — they copied what a
+Manifold published into `/manifold/*`, so in V2 they would subscribe to a topic
+nobody publishes and republish silence, while making the topic *appear* handled.
+
+Services went from 35 to **56/56**.
+
+### Finding F-2 — the rate caps measured a constraint that no longer exists
+
+V1 capped routes between 1 and 50 Hz, sized for the **wireless link to a
+Manifold** where `dds.xml` capped datagrams at 1400 bytes. V2's whole graph is
+shared memory in one container. Leaving the caps made the simulation *less*
+faithful than the aircraft it imitates — attitude arrived at 17 Hz against a
+documented 50.
+
+Removing them entirely overshot in the other direction (imu 88 Hz vs 50), which
+is equally wrong: a consumer tuned against the simulation would misbehave on
+hardware. Caps are now set from `PDF_RATE_HZ`, the documented aircraft rates.
+
+### Finding F-3 — the rate limiter under-delivered by a third
+
+Applying a 50 Hz cap to a 50 Hz stream produced **33.8 Hz**. The limiter tested
+`now - last < 1/max_hz`, and a real 50 Hz source does not arrive on a perfect
+20 ms grid: ordinary jitter puts about a third of samples a fraction early, and
+each of those was dropped.
+
+Replaced with a deadline that advances by one whole period (clamped so a burst
+after a quiet spell is not released at once). Result: **3 → 11 of 19 rates
+within ±20%**.
+
+### What is still not right, precisely
+
+**8 rates are source-limited.** The bridge cannot publish faster than PX4 feeds
+it, and PX4's rates are not DJI's:
+
+| wrapper topic | live | PDF | PX4 source |
+|---|---|---|---|
+| `flight_status`, `display_mode`, `flight_anomaly`, `rc_connection_status` | 2 Hz | 25 Hz | `vehicle_status_v4` at 2 Hz |
+| `altitude_barometric`, `altitude_sea_level` | 50 Hz | 70 Hz | `vehicle_global_position` at 50 Hz |
+| `single_battery_index2` | 1 Hz | 21 Hz | `battery_status_v1` at 1 Hz |
+| `relative_obstacle_info` | 1 Hz | 25 Hz | the LRF sensor's own `update_rate` is 1 in the model SDF |
+
+The fix is the one real DJI firmware uses: **republish from last-known state on
+a timer** at the surface's documented rate, rather than only on source change.
+`relative_obstacle_info` is cheaper still — raise the LRF `update_rate` in
+`models/m4e_camera/model.sdf`.
+
+**7 telemetry topics are not synthesised at all** — `acceleration_body_{fused,
+raw}`, `acceleration_ground_fused`, `esc_data`, `magnetic_field`, `rtk_velocity`,
+`rtk_yaw`, plus `perception_camera_parameters`. V1 never synthesised these
+either: they arrived from the aircraft's hardware and the bridge merely mirrored
+them, so there was no conversion to inherit. They are listed in
+`registry.SYNTHESIS_GAP` and reported by `tools/check_surface.py` as a gap
+rather than a failure, so nobody rediscovers them by watching a mission wait.
+
+**2 command topics have no honest conversion**: PX4 takes attitude and thrust on
+a different message entirely, and `flight_control_setpoint_generic` is a raw
+PSDK flag byte. A route that accepted them and quietly did nothing would be
+worse than their absence.
+
+### Finding F-4 — building the conformance check on the ROS CLI (again)
+
+`tools/check_surface.py` first reported **0/102** against a bridge that was
+demonstrably publishing: the CLI daemon answered from a cache populated before
+the bridge started. This is finding D-4 for the third time, so it is now a rule
+rather than an observation: **anything this project relies on reads the graph
+through rclpy, never through the `ros2` CLI.** The tool was rewritten
+accordingly, and it also has to spin for a few seconds before reading, because
+a fresh participant knows nothing about the graph the instant it is created.
 
 ---
 

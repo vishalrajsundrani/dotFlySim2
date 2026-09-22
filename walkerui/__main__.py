@@ -82,7 +82,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_dump(args: argparse.Namespace) -> int:
     from . import app
-    return app.run_dump(args.settle)
+    return app.run_dump(args.settle, getattr(args, "keys", ""))
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -140,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("dump", help="render one dashboard frame as text (for tests/CI)")
     s.add_argument("--settle", type=float, default=6.0)
+    s.add_argument("--keys", default="", help="keystrokes to apply before capturing")
     s.set_defaults(fn=cmd_dump)
 
     sub.add_parser("status", help="container and mounts").set_defaults(fn=cmd_status)

@@ -287,9 +287,23 @@ def start_walkerd(wait: float = 15.0) -> list[str]:
     import time
     if walkerd_running():
         return ["walkerd already running"]
+    # Invoked directly rather than through the image's /usr/local/bin/walkerd
+    # shim. The shim is a convenience for a human in `walker shell`; walker
+    # itself must not depend on it, because the shim is baked into the image
+    # and an older image would silently have an older one. (It did: the first
+    # build's shim carried `set -u`, which is fatal the moment ROS's setup.bash
+    # reads $AMENT_TRACE_SETUP_FILES.) Spelling the command out here means
+    # walker works against any image that has the mounts.
+    cmd = (
+        "set -eo pipefail; "
+        "source /opt/ros/jazzy/setup.bash; "
+        f"[ -f {paths.WORKSPACE}/install/setup.bash ] && "
+        f"source {paths.WORKSPACE}/install/setup.bash; "
+        f"exec python3 -B {paths.WORKSPACE}/src/walkerd/__main__.py "
+        "> /tmp/walkerd.log 2>&1"
+    )
     subprocess.Popen(
-        engine() + ["exec", "-d", paths.CONTAINER, "bash", "-lc",
-                    "walkerd > /tmp/walkerd.log 2>&1"],
+        engine() + ["exec", "-d", paths.CONTAINER, "bash", "-c", cmd],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + wait
     while time.time() < deadline:

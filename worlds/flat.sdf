@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- =========================================================================
+     flat — an empty field.
+
+     WHAT IT IS FOR
+     A world with nothing in it but ground. Use it when the thing under test is
+     the AIRCRAFT, not the scenery: tuning a climb controller, checking a
+     mission's step machine, measuring how long takeoff really takes, or
+     running a project in CI. The powerline corridor renders five towers, four
+     catenary spans and several hundred thousand triangles that a velocity
+     controller has no opinion about.
+
+     WHAT IT DELIBERATELY DOES NOT CONTAIN
+     System plugins. PX4's gz_env.sh points GZ_SIM_SERVER_CONFIG_PATH at a
+     server.config that already loads Physics, Sensors, Imu, AirPressure,
+     Magnetometer, NavSat, UserCommands and SceneBroadcaster. Declaring any of
+     them here would load that plugin TWICE, which applies forces twice and
+     makes the drone spin on the spot. The same warning is in powerline.sdf;
+     it is the one mistake a new world is most likely to make.
+
+     It also contains no aircraft. In V1 the world included model://m4e_camera,
+     which welded the world to one airframe; V2 injects the selected drone's
+     attachments at compose time instead (tools/compose_sim.py).
+     ========================================================================= -->
+<sdf version="1.9">
+  <world name="default">
+
+    <!-- 250 Hz, matching powerline.sdf. PX4's lockstep expects a steady step
+         rate; changing it here changes the effective control loop timing and
+         a mission tuned in one world would behave differently in the other. -->
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+
+    <scene>
+      <grid>true</grid>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.7 0.8 0.9 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <!-- Same origin as the corridor, so a mission's GPS coordinates mean the
+         same thing in both worlds and a bag recorded in one can be compared
+         against the other. -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>24.867412</latitude_deg>
+      <longitude_deg>67.057352</longitude_deg>
+      <elevation>8</elevation>
+    </spherical_coordinates>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 100 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.25 0.25 0.25 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- 2 km square: far enough that a mission flying a 12 m orbit, or a
+         straight-line test at 20 m/s, never reaches an edge. -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>2000 2000</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.0</mu>
+                <mu2>1.0</mu2>
+              </ode>
+            </friction>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>2000 2000</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.35 0.38 0.30 1</ambient>
+            <diffuse>0.42 0.46 0.36 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

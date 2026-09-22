@@ -20,7 +20,7 @@ import threading
 import time
 from collections import deque
 
-from . import paths
+from . import paths, scan
 from .client import Client, WalkerdError
 
 # Colour pairs, allocated once in main().
@@ -32,6 +32,16 @@ STATE_COLOUR = {
 }
 STATE_MARK = {
     "running": "●", "starting": "◐", "stopping": "◑", "failed": "✖", "stopped": "○",
+}
+
+# The four camera profiles, with what each costs. The megapixel figures are
+# measured for the m4e's 12 payload + 2 fisheye sensors (SPIKE-1); walker
+# recomputes them per drone from its manifest once more drones exist.
+_CAMERA_TITLES = {
+    "none":    ("no cameras",      "0 MP/s — fastest; flight work, CI"),
+    "fisheye": ("fisheye only",    "~20 MP/s — obstacle avoidance, stereo, SLAM"),
+    "payload": ("payload only",    "~1074 MP/s — gimbal/inspection, QGC video"),
+    "all":     ("fisheye + payload", "~1094 MP/s — needs a real GPU"),
 }
 
 # unit -> the key that starts/stops it. Mirrors §7 so the help screen and the
@@ -51,6 +61,10 @@ class App:
         self.status_until = 0.0
         self.links: list[dict] = []
         self.busy: set[str] = set()
+        # The picker overlays the dashboard rather than replacing the app's
+        # state, so events keep arriving and the simulation keeps running
+        # while you browse. None means the dashboard is showing.
+        self.picker: dict | None = None
         self.quit = False
         self._lock = threading.RLock()
 
@@ -147,11 +161,125 @@ class App:
         except curses.error:
             pass
 
+    # ── the picker ───────────────────────────────────────────────────────────
+
+    def open_picker(self, kind: str) -> None:
+        """
+        Open a chooser over the dashboard.
+
+        Rescans on open, always. A cached list is fine for redrawing, but the
+        moment you PRESS the key you are usually asking because you just put
+        something in the directory -- so that press is the one time the cache
+        must not be trusted.
+        """
+        if kind == "cameras":
+            items = [scan.Entry(name=p, path=paths.REPO, kind="camera",
+                                title=_CAMERA_TITLES[p][0],
+                                detail=_CAMERA_TITLES[p][1])
+                     for p in scan.CAMERA_PROFILES]
+            current = self.selection.get("cameras", "none")
+        else:
+            items = scan.get("worlds" if kind == "world" else "drones", force=True)
+            current = self.selection.get(kind, "")
+
+        if not items:
+            where = {"world": "worlds/", "drone": "models/"}.get(kind, "")
+            self.say(f"nothing to choose: no {kind}s found in {where}", 8)
+            return
+        idx = next((i for i, e in enumerate(items) if e.name == current), 0)
+        self.picker = {"kind": kind, "items": items, "idx": idx}
+
+    def picker_key(self, k: str, ch: int) -> None:
+        pk = self.picker
+        n = len(pk["items"])
+        if ch in (curses.KEY_UP,) or k == "k":
+            pk["idx"] = (pk["idx"] - 1) % n
+        elif ch in (curses.KEY_DOWN,) or k == "j":
+            pk["idx"] = (pk["idx"] + 1) % n
+        elif ch in (curses.KEY_ENTER, 10, 13):
+            self.commit_picker()
+        elif k in ("\x1b", "q"):
+            self.picker = None
+        elif ch == curses.KEY_F5 or k == "5":
+            scan.invalidate()
+            self.open_picker(pk["kind"])
+            self.say("rescanned")
+
+    def commit_picker(self) -> None:
+        pk = self.picker
+        entry = pk["items"][pk["idx"]]
+        if not entry.usable:
+            # Refusing here, with the reason, beats composing something that
+            # will fail later inside Gazebo with a URI error.
+            self.say(f"{entry.name} cannot be used: {entry.error}", 12)
+            return
+        field = pk["kind"]
+        self.picker = None
+
+        sim_state = self.units.get("sim", {}).get("state", "stopped")
+
+        def go():
+            self.c.select(**{field: entry.name})
+            with self._lock:
+                self.selection[field] = entry.name
+            if sim_state in ("running", "starting"):
+                # Honest about what a selection does and does not do: the
+                # composition is built when the simulation STARTS, so changing
+                # the drone or world under a running one changes nothing until
+                # it is restarted. V1 had the same property and did not say so.
+                self.say(f"{field} = {entry.name} — restart the sim (s) for it "
+                         f"to take effect", 12)
+            else:
+                self.say(f"{field} = {entry.name}", 5)
+        self.bg("select", go)
+
+    def draw_picker(self) -> None:
+        s, pk = self.scr, self.picker
+        h, w = s.getmaxyx()
+        kind = pk["kind"]
+        heading = {"world": "Worlds — worlds/", "drone": "Drones — models/",
+                   "cameras": "Camera profile"}[kind]
+        self.put(0, 0, f" {heading} ".ljust(w),
+                 curses.color_pair(C_HEAD) | curses.A_BOLD)
+
+        top = 2
+        room = h - top - 3
+        items = pk["items"]
+        # Keep the cursor in view without scrolling for short lists.
+        first = max(0, min(pk["idx"] - room // 2, len(items) - room)) if len(items) > room else 0
+        for i in range(first, min(len(items), first + room)):
+            e = items[i]
+            y = top + (i - first)
+            sel = (i == pk["idx"])
+            attr = curses.A_REVERSE if sel else 0
+            mark = "›" if sel else " "
+            self.put(y, 1, mark, curses.color_pair(C_KEY) | curses.A_BOLD)
+            name = e.name[:20].ljust(21)
+            self.put(y, 3, name, attr | (curses.A_BOLD if e.usable else 0))
+            self.put(y, 25, (e.title or "")[:30].ljust(31),
+                     0 if e.usable else curses.color_pair(C_DIM))
+            if e.usable:
+                self.put(y, 57, e.detail[:max(0, w - 59)], curses.color_pair(C_DIM))
+            else:
+                self.put(y, 57, e.error[:max(0, w - 59)], curses.color_pair(C_FAIL))
+            if e.name == self.selection.get(kind):
+                self.put(y, 0, "•", curses.color_pair(C_OK) | curses.A_BOLD)
+
+        if self.status and time.time() < self.status_until:
+            self.put(h - 2, 2, self.status, curses.color_pair(C_WARN))
+        bar = (" [↑↓/jk] move   [enter] choose   [F5] rescan   [esc] back "
+               "   • = current ")
+        self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
+        s.refresh()
+
     # ── drawing ──────────────────────────────────────────────────────────────
 
     def draw(self) -> None:
         s = self.scr
         s.erase()
+        if self.picker is not None:
+            self.draw_picker()
+            return
         h, w = s.getmaxyx()
         if h < 18 or w < 70:
             self.put(0, 0, "terminal too small (need 70x18)"[:w - 1])
@@ -246,8 +374,16 @@ class App:
 
     def key(self, ch: int) -> None:
         try:
-            k = chr(ch)
+            k = chr(ch) if 0 <= ch < 0x110000 else ""
         except ValueError:
+            k = ""
+        if self.picker is not None:
+            self.picker_key(k, ch)
+            return
+        if ch == curses.KEY_F5:
+            scan.invalidate()
+            self.refresh_state()
+            self.say("rescanned models/, worlds/, bags/, projects/")
             return
         if k in ("Q",):
             self.quit = True
@@ -265,11 +401,14 @@ class App:
         elif k == "t":
             self.open_terminal("sim")
         elif k == "?":
-            self.say("keys: s sim · P probe · t terminal · Q quit   "
-                     "(full help screen lands with the other units)", 10)
-        elif k in ("w", "d", "c"):
-            self.say(f"the {'world' if k=='w' else 'drone' if k=='d' else 'cameras'}"
-                     f" screen lands in M3", 6)
+            self.say("keys: s sim · w world · d drone · c cameras · F5 rescan · "
+                     "P probe · t terminal · Q quit", 10)
+        elif k == "w":
+            self.open_picker("world")
+        elif k == "d":
+            self.open_picker("drone")
+        elif k == "c":
+            self.open_picker("cameras")
 
     def open_terminal(self, unit: str) -> None:
         from .terminal import open_window
@@ -296,7 +435,7 @@ class App:
             time.sleep(0.05)
 
 
-def dump(stdscr, settle: float = 6.0) -> str:
+def dump(stdscr, settle: float = 6.0, keys: str = "") -> str:
     """
     Draw one settled frame and return the screen as text.
 
@@ -312,10 +451,21 @@ def dump(stdscr, settle: float = 6.0) -> str:
     client.connect()
     app.c = client
     app.refresh_state()
+    # Let state arrive first, then apply the keystrokes, then let the result
+    # settle -- so a capture shows the screen a person would actually see
+    # after pressing those keys, not a half-populated one.
     deadline = time.time() + settle
     while time.time() < deadline:
         app.draw()
         time.sleep(0.1)
+    for ch in keys:
+        app.key(ord(ch))
+        for _ in range(8):
+            app.draw()
+            time.sleep(0.05)
+    for _ in range(12):
+        app.draw()
+        time.sleep(0.05)
     h, w = stdscr.getmaxyx()
     rows = []
     for y in range(h):
@@ -356,6 +506,6 @@ def run() -> int:
     return curses.wrapper(main)
 
 
-def run_dump(settle: float = 6.0) -> int:
-    print(curses.wrapper(dump, settle))
+def run_dump(settle: float = 6.0, keys: str = "") -> int:
+    print(curses.wrapper(dump, settle, keys))
     return 0

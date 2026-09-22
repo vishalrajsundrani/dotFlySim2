@@ -1,0 +1,17 @@
+# flat — an empty field, for testing the aircraft rather than the scenery.
+title       = "Empty field"
+description = "Bare ground, 2 km square. Fast: use it to test flight behaviour, or in CI."
+
+gz_world_name = "default"
+
+# Same origin as powerline, so coordinates mean the same thing in both and a
+# bag from one can be compared against the other.
+[spawn]
+lat = 24.867412
+lon = 67.057352
+alt = 8.0
+
+# Nothing to load, so nothing to be missing.
+requires_models = []
+
+heavy = false

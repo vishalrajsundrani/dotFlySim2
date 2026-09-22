@@ -87,10 +87,23 @@ CAMERA_PROFILES = ("none", "fisheye", "payload", "all")
 
 
 def load_toml(path: str) -> dict:
+    """
+    Read a manifest, or fail with a message a person can act on.
+
+    An unhandled TOMLDecodeError here prints a traceback whose most prominent
+    line is a frame in this file -- which reads as "compose_sim.py is broken"
+    rather than "your manifest has a typo on line 3". The file and the parser's
+    own complaint are what matter, so that is what gets printed.
+    """
     if not os.path.isfile(path):
         return {}
-    with open(path, "rb") as fh:
-        return tomllib.load(fh)
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except tomllib.TOMLDecodeError as e:
+        raise SystemExit(f"compose: {path} is not valid TOML.\n  {e}")
+    except OSError as e:
+        raise SystemExit(f"compose: cannot read {path}: {e}")
 
 
 def drone_manifest(models_dir: str, name: str) -> dict:

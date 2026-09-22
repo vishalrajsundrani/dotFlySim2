@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>demo_orbit_mission</name>
+  <version>1.0.0</version>
+  <description>
+    A complete autonomous sortie in one C++ state machine, flown entirely over
+    the /wrapper/psdk_ros2 surface: check battery and vehicle status, take
+    control authority, take off, fly two laps of a small circle on the RC stick
+    channel, then return home and land.
+
+    Publishes a human-readable status line on ~/state and answers ~/start and
+    ~/abort (std_srvs/Trigger).
+  </description>
+  <maintainer email="dotfly0@gmail.com">Farmevo Engineering</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>geometry_msgs</depend>
+  <depend>psdk_interfaces</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

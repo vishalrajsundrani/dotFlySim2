@@ -140,6 +140,18 @@ class Unit:
     def alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
+    def mark(self, state: str, detail: str = "") -> None:
+        """
+        Announce a state the supervisor drives from outside the process.
+
+        A unit is normally STARTING only once its process exists, but a project
+        spends a minute being BUILT before there is a process to supervise, and
+        during that minute the dashboard must not say `stopped` -- a caller
+        watching for a terminal state would conclude the mission had already
+        finished. This is how walkerd says "I am working on it".
+        """
+        self._set_state(state, detail)
+
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -148,6 +160,12 @@ class Unit:
                 return
             self.exit_code = None
             self.detail = ""
+            # A FRESH RING PER RUN. Without this, a unit that failed, was
+            # fixed, and failed again for a different reason reports the OLD
+            # reason too -- `detail` quotes the tail of the ring, and the ring
+            # still held the previous run's last words. Observed exactly that:
+            # "Package not found | Package not found", one from each attempt.
+            self.ring.clear()
             self._set_state(STARTING)
 
             # A pty, not a pipe -- see the module docstring.
@@ -312,14 +330,27 @@ class Unit:
                                            "t": time.time()})
                             break
 
-        # The process ended. Distinguish "we asked it to" from "it fell over",
-        # because only one of those is worth interrupting the operator for.
+        # The process ended. THREE outcomes, not two, and conflating them is a
+        # real loss of information:
+        #
+        #   we asked it to stop      -> STOPPED, quietly
+        #   it finished its work     -> STOPPED, with "completed"
+        #   it fell over             -> FAILED, with its last words
+        #
+        # The middle case is the one that is easy to get wrong. A mission that
+        # flies its pattern, lands, releases authority and exits 0 has
+        # SUCCEEDED; reporting that as `failed` on the dashboard tells the
+        # operator their flight went wrong when it went exactly right. Only a
+        # non-zero exit is a failure.
         code = self._proc.poll() if self._proc else None
         with self._lock:
             self.exit_code = code
             if self.state not in (STOPPING, STOPPED):
-                tail = " | ".join(list(self.ring)[-3:])
-                self._set_state(FAILED, f"exited with code {code}: {tail[:200]}")
+                if code == 0:
+                    self._set_state(STOPPED, "completed")
+                else:
+                    tail = " | ".join(list(self.ring)[-3:])
+                    self._set_state(FAILED, f"exited with code {code}: {tail[:200]}")
             self._close_master()
 
     def _close_master(self) -> None:

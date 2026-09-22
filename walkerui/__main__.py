@@ -36,6 +36,9 @@ def cmd_up(args: argparse.Namespace) -> int:
         return 1
     ui.ok("container is up")
     try:
+        if getattr(args, "restart_walkerd", False):
+            for note in dockerctl.stop_walkerd():
+                ui.info(note)
         for note in dockerctl.start_walkerd():
             ui.info(note)
     except dockerctl.DockerError as e:
@@ -128,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("up", help="start the container")
     s.add_argument("--recreate", action="store_true",
                    help="remove and recreate it (needed after a mount change)")
+    s.add_argument("--restart-walkerd", action="store_true",
+                   help="stop walkerd first; use after editing walkerd/ or bridge/, "
+                        "since a running supervisor holds the old code in memory")
     s.set_defaults(fn=cmd_up)
 
     s = sub.add_parser("down", help="stop the container")

@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>demo_arm_takeoff</name>
+  <version>1.0.0</version>
+  <description>
+    Smallest useful PSDK client of the dotFlySim simulator: wait for wrapper
+    telemetry, take control authority, arm, take off, hold, land on request.
+
+    Restricted to the /wrapper/psdk_ros2 surface -- the services and topics a
+    real DJI payload application has. It never touches PX4's uORB topics and
+    does not depend on px4_msgs.
+  </description>
+  <maintainer email="dotfly0@gmail.com">Farmevo Engineering</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>psdk_interfaces</depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

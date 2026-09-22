@@ -27,9 +27,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import constraints                      # noqa: E402
 import probes                           # noqa: E402
+import projects                         # noqa: E402
 from rosnode import RosWatcher          # noqa: E402
 from server import Server               # noqa: E402
 from units import (FAILED, LogRule, RUNNING, STARTING, Unit, UnitSpec)  # noqa: E402
+
+# project.conf spells the setpoint frame the way a mission author thinks about
+# it; the bridge names the same routes slightly differently.
+_SETPOINT_ALIASES = {
+    "velocity": "velocity", "enu_velocity": "velocity",
+    "position": "position", "enu_position": "position",
+    "body": "body", "body_velocity": "body", "flu": "body",
+    "rc": "rc",
+}
 
 HOME = os.path.expanduser("~")
 WS = os.path.join(HOME, "ws")
@@ -135,6 +145,29 @@ class Daemon:
             ],
         ))
 
+        # The project unit's argv is rewritten each time one is started -- see
+        # op_start. It is declared here with a placeholder so the unit exists
+        # in the table (and on the dashboard) before anything has been chosen.
+        add(UnitSpec(
+            name="project",
+            argv=["/bin/true"],
+            cwd=projects.PROJECTS,
+            ready=None,          # a mission is "ready" as soon as it is running
+            stop_signal=signal.SIGINT,
+            stop_timeout=15.0,
+            description="one C++ mission, talking only to the wrapper surface",
+            log_rules=[
+                # A mission's step transitions are the whole story, and
+                # demo_orbit_mission's own logging convention is what these
+                # match: "[STEP 12s] status=... mode=... height=..."
+                LogRule(r"^\[[A-Z_]+ ", "info"),
+                LogRule(r"telemetry is flowing|reached|finished|landed|starting the circle",
+                        "info"),
+                LogRule(r"ok$|: ok", "info"),
+                LogRule(r"refused|not available|ERROR|could not|never switched", "warn"),
+            ],
+        ))
+
     # ── state ────────────────────────────────────────────────────────────────
 
     def running(self) -> set[str]:
@@ -154,12 +187,44 @@ class Daemon:
         name = req.get("unit", "")
         unit = self.units.get(name)
         if unit is None:
-            return {"ok": False, "error": "no such unit", "reason": name}
+            # Naming the unit alone reads as if the unit were the reason for a
+            # refusal, which is how a not-yet-implemented feature looks exactly
+            # like a constraint violation on the dashboard.
+            return {"ok": False, "error": "no such unit",
+                    "reason": f"'{name}' is not a unit this walkerd knows",
+                    "hint": f"units: {', '.join(self.units)}"}
 
         verdict = constraints.check(name, self.running())
         if not verdict.allowed:
             return {"ok": False, "error": "refused", "reason": verdict.reason,
                     "held_by": verdict.held_by, "hint": verdict.hint}
+
+        if name == "project":
+            # PREPARING A PROJECT CAN TAKE MINUTES, so it does not happen
+            # inside the request. A stale mission is rebuilt first (57 s is
+            # typical), then the bridge is put into project mode, then the unit
+            # starts -- and a request that blocked for all of that would time
+            # out on the client, which is exactly what happened the first time.
+            #
+            # The reply says "accepted" and everything after it is reported the
+            # way every other unit transition is: as events. The unit goes
+            # STARTING -> RUNNING, or STARTING -> FAILED with the reason in its
+            # detail, and walker's dashboard shows either without waiting.
+            args = req.get("args", {}) or {}
+            unit = self.units["project"]
+
+            def prepare_and_start():
+                err = self._prepare_project(args)
+                if err:
+                    unit.mark(FAILED, err)
+                    return
+                unit.start()
+
+            unit.mark(STARTING, "preparing (build + bridge project mode)")
+            threading.Thread(target=prepare_and_start, daemon=True,
+                             name="prepare-project").start()
+            return {"ok": True, "accepted": True,
+                    "advisories": list(verdict.advisories)}
 
         # The simulation is COMPOSED before it starts: which drone, which world
         # and which camera profile are decisions made on walker's screens, and
@@ -172,11 +237,80 @@ class Daemon:
         unit.start()
         return {"ok": True, "advisories": list(verdict.advisories)}
 
+    def _prepare_project(self, args: dict) -> str:
+        """
+        Point the project unit at a mission, building it if need be.
+        Returns "" or an error meant for a human.
+        """
+        name = args.get("package", "")
+        if not name:
+            return "no project named"
+        st = projects.status(name)
+        if st["state"] in ("missing", "broken"):
+            return f"{name}: {st['detail']}"
+
+        # Build when it has never been built, or when the source is newer than
+        # the binary. Running a stale binary is the failure that wastes the
+        # most time: the mission runs, behaves like the old code, and nothing
+        # says why.
+        if st["state"] in ("unbuilt", "stale") or args.get("rebuild"):
+            self.server.broadcast({"ev": "log", "unit": "project", "level": "info",
+                                   "t": time.time(),
+                                   "text": f"building {name} ({st['detail']})"})
+            ok, out = projects.build(name)
+            for line in out.splitlines()[-12:]:
+                self.server.broadcast({"ev": "log", "unit": "project",
+                                       "level": "info" if ok else "warn",
+                                       "t": time.time(), "text": line})
+            if not ok:
+                return f"{name} failed to build; see the log"
+
+        unit = self.units["project"]
+        unit.spec.argv = projects.run_argv(name, args.get("params"))
+        unit.spec.description = f"{name} — wrapper surface only"
+        self.selection["project"] = name
+
+        # PUT THE BRIDGE IN PROJECT MODE BEFORE THE MISSION STARTS.
+        #
+        # Without this the mission runs, takes authority, takes off, and then
+        # sits publishing velocity setpoints that go nowhere, because
+        # auto_offboard defaults to False and PX4 never leaves its current
+        # mode. The symptom is the mission's own timeout -- "PX4 never
+        # switched to SDK_CTRL" -- which names neither the bridge nor the
+        # setting. Observed exactly that on the first end-to-end flight.
+        #
+        # Which setpoint route to arm comes from the project's own
+        # project.conf, so a mission that steers in the body frame
+        # (demo_camera_track) gets the body-frame route rather than the
+        # ground-frame default.
+        setpoint = _SETPOINT_ALIASES.get(
+            projects.conf(name).get("SETPOINT", "velocity").lower(), "velocity")
+        if not self.watch.send_control(f"project value=on setpoint={setpoint}"):
+            return ("the bridge did not accept project mode (is it running?) -- "
+                    "without it PX4 will never switch to offboard")
+        # node.py applies one endpoint mutation per tick, so the table is not
+        # fully in place the instant the message is accepted.
+        time.sleep(4.0)
+        self.server.broadcast({"ev": "log", "unit": "project", "level": "info",
+                               "t": time.time(),
+                               "text": f"bridge in project mode, setpoint={setpoint}"})
+        return ""
+
     def op_stop(self, req: dict) -> dict:
-        unit = self.units.get(req.get("unit", ""))
+        name = req.get("unit", "")
+        unit = self.units.get(name)
         if unit is None:
             return {"ok": False, "error": "no such unit"}
-        threading.Thread(target=unit.stop, daemon=True).start()
+
+        def go():
+            unit.stop()
+            # Hand the bridge its route table back. Leaving it in project mode
+            # would leave the simulation quietly wide open -- auto_offboard on,
+            # setpoint routes live -- for whatever runs next.
+            if name == "project":
+                self.watch.send_control("project value=off", wait_for_bridge=2.0)
+
+        threading.Thread(target=go, daemon=True).start()
         return {"ok": True}
 
     def compose(self) -> str:
@@ -219,11 +353,29 @@ class Daemon:
                     "processes": probes.process_links(),
                     "links": self.watch.links(wrapper=req.get("wrapper", True)),
                     "watcher_error": self.watch.error}
+        if op == "projects":
+            return {"ok": True, "projects": projects.listing()}
+        if op == "build":
+            name = req.get("package", "")
+            ok, out = projects.build(name)
+            return {"ok": ok, "output": out.splitlines()[-20:],
+                    "status": projects.status(name)}
         if op == "constraints":
             return {"ok": True, "table": constraints.as_table(),
                     "rules": [{"want": r.want, "blocker": r.blocker,
                                "reason": r.reason, "hint": r.hint}
                               for r in constraints.RULES]}
+        if op == "attach":
+            # Output events already go to every client, so attaching is really
+            # just an acknowledgement: attach.py filters by unit name. Keeping
+            # it as an explicit op means walkerd can refuse a name that does
+            # not exist, rather than leaving a terminal silently showing
+            # nothing.
+            if req.get("unit") not in self.units:
+                return {"ok": False, "error": "no such unit",
+                        "reason": f"'{req.get('unit')}' is not a unit",
+                        "hint": f"units: {', '.join(self.units)}"}
+            return {"ok": True, "attached": req.get("unit")}
         if op == "logs":
             unit = self.units.get(req.get("unit", ""))
             if unit is None:

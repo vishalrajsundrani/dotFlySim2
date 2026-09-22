@@ -76,6 +76,7 @@ class RosWatcher:
         self._stamps: dict[str, deque] = {k: deque() for k, *_ in WATCH}
         self._lock = threading.Lock()
         self._node = None
+        self._control = None      # publisher onto /simty/control
         self._exec = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -114,6 +115,13 @@ class RosWatcher:
         try:
             rclpy.init(args=None)
             self._node = Node("walkerd_watch")
+
+            # The bridge's command surface. In V1 this was driven by the
+            # bridge's own curses console; in V2 walker is the operator
+            # surface, so walkerd holds the publisher and walker's keys reach
+            # it over the socket. One verb per message -- see simty/control.py.
+            from std_msgs.msg import String
+            self._control = self._node.create_publisher(String, "/simty/control", 10)
             for key, _n, topics, type_str, qos, _w in WATCH:
                 cls = self._import(type_str)
                 if cls is None:
@@ -155,6 +163,31 @@ class RosWatcher:
             for dq in self._stamps.values():
                 while dq and dq[0] < cutoff:
                     dq.popleft()
+
+    def send_control(self, text: str, wait_for_bridge: float = 5.0) -> bool:
+        """
+        Send one verb to the bridge. True if it was published.
+
+        Waits briefly for the bridge's subscription to exist first. Publishing
+        into a topic with no subscriber succeeds silently and the command
+        simply vanishes -- which is how V1's launcher used to report "project
+        testing mode requested" about a bridge that never heard it, leaving
+        every service the project was about to call unserved.
+        """
+        if self._control is None:
+            return False
+        from std_msgs.msg import String
+        deadline = time.monotonic() + wait_for_bridge
+        while time.monotonic() < deadline:
+            if self._control.get_subscription_count() > 0:
+                break
+            time.sleep(0.2)
+        else:
+            return False
+        msg = String()
+        msg.data = text
+        self._control.publish(msg)
+        return True
 
     # ── reading ──────────────────────────────────────────────────────────────
 

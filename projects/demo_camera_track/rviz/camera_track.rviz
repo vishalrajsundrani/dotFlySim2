@@ -1,0 +1,174 @@
+# demo_camera_track -- the camera view, and what the tracker makes of it.
+#
+#   ./demo/run_demo.sh rviz                 # opens this, in the container
+#   rviz2 -d ~/uav_ws/src/demo/demo_camera_track/rviz/camera_track.rviz
+#
+# TWO IMAGE DISPLAYS, ON PURPOSE
+# ------------------------------
+# "Tracker view" is the annotated frame the demo publishes: the box it drew
+# round what it believes is the target, the centroid, and the crosshair it is
+# steering that centroid onto. Green box = inside the deadbands, amber = still
+# closing. "Camera (wrapper)" is the same frame before annotation. When a
+# tracker misbehaves, the difference between those two pictures IS the
+# diagnosis -- so the raw feed is here, one checkbox away, rather than in
+# another config.
+#
+# The raw display ships DISABLED because every subscriber costs real traffic:
+# each RViz Image display is another reader of a multi-megabyte-per-second
+# stream. Tick it when you need it, untick it when you do not.
+#
+# RELIABILITY POLICY: BEST EFFORT ON EVERY IMAGE DISPLAY.
+# The bridge publishes video BEST_EFFORT/VOLATILE (the "video" QoS preset), and
+# a RELIABLE subscription never matches a best-effort publisher -- it just shows
+# an empty panel with no error anywhere. If a display stays blank, check this
+# field first.
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 78
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Tracker view1
+      Splitter Ratio: 0.5
+    Tree Height: 480
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.25
+      Cell Size: 5
+      Class: rviz_default_plugins/Grid
+      Color: 130; 130; 130
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: map
+      Value: true
+
+    # ── what the tracker believes ────────────────────────────────────────────
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Tracker view
+      Normalize Range: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /demo_camera_track/image
+      Value: true
+
+    # ── the same frame, unannotated ──────────────────────────────────────────
+    # This is the wrapper topic -- the picture a PSDK payload application would
+    # get. It only carries anything while the bridge's main_camera_out route is
+    # pointed sim->host (./demo/run_demo.sh camera on).
+    - Class: rviz_default_plugins/Image
+      Enabled: false
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Camera (wrapper main_camera_stream)
+      Normalize Range: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /wrapper/psdk_ros2/main_camera_stream
+      Value: false
+
+    # ── the simulator's own feed, before the bridge ──────────────────────────
+    # Straight off camera_switcher.py, so it works even with every bridge video
+    # route off. Subscribing here makes Gazebo render that sensor (bridge.yaml
+    # uses lazy:true), which is why it is disabled by default.
+    - Class: rviz_default_plugins/Image
+      Enabled: false
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Sim active lens (renders on subscribe)
+      Normalize Range: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /drone/camera/active/image_raw
+      Value: false
+
+    # ── the aircraft, for context ────────────────────────────────────────────
+    # The bridge's own vehicle markers, so the camera panels can be read next to
+    # where the aircraft actually is. Published by simty/viz.py in `map`.
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Vehicle
+      Namespaces: {}
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /simty/viz/vehicle
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 32; 34; 38
+    Fixed Frame: map
+    Frame Rate: 15
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 40
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 10
+        Y: 0
+        Z: 5
+      Name: World
+      Near Clip Distance: 0.01
+      Pitch: 0.35
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz_default_plugins)
+      Yaw: 0.9
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Tracker view:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1600

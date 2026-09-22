@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>demo_camera_track</name>
+  <version>1.0.0</version>
+  <description>
+    Flies the simulated m4e from what its camera sees: reads frames off the
+    wrapper's main_camera_stream, finds a target by colour, and turns the
+    target's position in the IMAGE into a body-frame velocity command -- yaw to
+    centre it, climb or descend to centre it, close or open the range to hold
+    its apparent size. Publishes an annotated frame on ~/image for RViz.
+
+    Restricted to the /wrapper/psdk_ros2 surface, like the other demos, and
+    deliberately free of OpenCV: the detector walks the sensor_msgs/Image
+    buffer directly.
+  </description>
+  <maintainer email="dotfly0@gmail.com">Farmevo Engineering</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>geometry_msgs</depend>
+  <depend>psdk_interfaces</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

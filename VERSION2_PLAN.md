@@ -1246,7 +1246,7 @@ acceptance test passes.
 | **M2** ✅ | **walkerd + walker skeleton** | **DONE 2026-09-21.** Dashboard renders with live link rates. Socket round-trip **0.064 ms median / 0.83 ms max** over 200 calls (budget was <1 ms). The `sim` unit starts (20 s to ready), runs, and stops in 1 s **leaving no orphans**, all through walkerd. The readiness probe names the failing layer when Gazebo is killed. Constraint matrix enforced from one table. `walker dump` renders a frame as text so the layout is testable in CI. |
 | **M3** ✅ | **World + drone selection** | **DONE 2026-09-22.** Full scan of models/worlds/bags/projects in **4.7 ms** (budget 200 ms). Worlds, Drones and Cameras pickers render and commit to walkerd. A second world (`flat`) written from scratch was scanned, selected and **flew** — no rebuild, no code change. Generated airframe vs V1's: see Appendix E — numerically identical, not byte-identical. |
 | **M4** 🔶 | **Bridge always-on + full PSDK surface** | **Substantially done 2026-09-22.** ✅ Bridge is a walkerd unit, up with the simulation. ✅ **56/56 services (100%)** with service introspection on (59 `_service_event` topics). ✅ 90/102 of the surface live, **0 unexpectedly absent**. ✅ 11/19 measurable rates within ±20% of the PDF (was 3). ⬜ Remaining: 8 source-limited rates need periodic republish; 7 telemetry topics need converters V1 never had. See Appendix F. |
-| **M5** | **C++ projects + terminals + constraints** | `demo_orbit_mission` flies a clean 2-lap orbit and lands; starting a second project is refused with the right message; each unit opens its own ptyxis window; walker shows the project’s step transitions in its log pane |
+| **M5** ✅ | **C++ projects + terminals + constraints** | **DONE 2026-09-22.** `demo_orbit_mission` flies authority → takeoff → climb → a clean orbit → land → release, **exits 0 by itself**, and frees the flight lock. A second project is refused by name with the way out. `walker-attach` gives a live PX4 console in its own ptyxis window. Step transitions appear in walker's log pane. See Appendix G. |
 | **M6** | **Cameras + RViz + QGC + the guard** | all four boot profiles; **live on/off during a flight with the frame rate change visible in `gz stats`**; RViz shows every enabled camera; the new walker panel (§14.3) renders and its four actions work; QGC connects and flies manually; **and with a project running, QGC's arm / mode-change / mission-upload are demonstrably dropped by the guard, with telemetry still live** |
 | **M7** | **rosbag record + replay** | record during a project; record during a replay; named bag lands in `bags/`; `ros2 bag info` is clean; fly-back replay re-flies the recorded orbit; passive replay drives RViz with no simulation running |
 | **M8** | **Documentation** | the three files, reviewed against the built system, every command in them executed once |
@@ -1714,6 +1714,98 @@ rather than an observation: **anything this project relies on reads the graph
 through rclpy, never through the `ros2` CLI.** The tool was rewritten
 accordingly, and it also has to spin for a few seconds before reading, because
 a fresh participant knows nothing about the graph the instant it is created.
+
+---
+
+## Appendix G — M5: the first real flight, and six bugs it found
+
+### The flight
+
+```
+telemetry is flowing, starting
+obtain_ctrl_authority: ok
+takeoff: ok
+automatic takeoff finished at 1.10 m, taking over to reach 3.0 m
+reached 2.9 m, starting the circle
+circle finished after 40 s, landing
+landed and disarmed
+release_ctrl_authority: ok
+flight finished, shutting down
+```
+
+Two laps of 20 s each, landing exactly on schedule — flown entirely through
+`/wrapper/psdk_ros2`, with the same binary that would fly a real Matrice 4E.
+
+### G-1 — the mission flew but never engaged offboard
+
+The first attempt reached `automatic takeoff finished at 0.75 m` and then:
+`PX4 never switched to SDK_CTRL after 15 s`. Every service worked; the
+setpoints went nowhere.
+
+`auto_offboard` defaults to **False**, and only `set_project_mode` turns it on
+— in V1 that was the operator pressing `P` on the bridge console. The mission's
+own error message names neither the bridge nor the setting, so from inside the
+mission this is indistinguishable from a broken simulation.
+
+walkerd now sends `project value=on setpoint=<from project.conf>` before
+starting a mission, and `project value=off` when it stops, so the bridge is
+never left quietly wide open. The setpoint frame comes from the project, so
+`demo_camera_track` gets the body-frame route rather than the ground-frame
+default.
+
+### G-2 — a finished mission held the simulation hostage
+
+`demo_orbit_mission` reached `DONE` and kept spinning. walkerd treats a running
+process as a running mission, and a running mission holds the flight lock — so
+a *completed* flight locked out the next project, locked out replay, and would
+have kept QGC in observer mode, until somebody noticed and stopped it by hand.
+
+Every ported mission now calls `rclcpp::shutdown()` on `DONE`. This is a
+contract item for `CPP_DESIGN.md`: **a mission that has finished exits.**
+
+### G-3 — a clean exit was reported as a failure
+
+With G-2 fixed, the dashboard said `failed — exited with code 0`. A mission that
+flies its pattern, lands, releases authority and exits 0 has *succeeded*;
+calling that a failure tells the operator their flight went wrong when it went
+exactly right. There are three outcomes, not two: asked to stop, finished its
+work (`stopped — completed`), and fell over.
+
+### G-4 — a 57 s build inside a request
+
+Starting a stale project rebuilt it first, and the request blocked for the whole
+build until the client gave up at 60 s. The same "never block" rule that governs
+the keyboard governs the protocol: the reply is now immediate, and the build,
+the bridge mode change and the start are reported as ordinary unit events.
+The unit shows `starting — preparing (build + bridge project mode)`.
+
+### G-5 — walkerd kept dying with an empty log
+
+`docker exec -d` returns immediately, but the process it starts stays in that
+exec session's process group. When the docker client was killed — a script
+timing out, a terminal closing — the group got SIGTERM and walkerd shut down
+cleanly and invisibly. The container had not restarted and the log held no
+error, which makes this very hard to read.
+
+Fixed with `setsid nohup`, and verified: walkerd now survives its client being
+killed. `walker up --restart-walkerd` was added for the case that kept biting
+during development — editing `walkerd/` or `bridge/` has no effect until the
+supervisor is restarted, because Python holds the old module in memory.
+
+### G-6 — the scanner caught a V1 bug on sight
+
+`demo_square_mission/package.xml` declared `<name>demo_orbit_mission</name>` —
+two directories building one package name, so colcon installed whichever it saw
+last. This is exactly what V2's "package name equals directory name" rule exists
+to catch, and it was caught the first time the projects were scanned.
+
+### A note on what `ros2 run` needs
+
+A mission built after walkerd started was not in walkerd's environment, and
+`ros2 run` answered *"Package 'demo_orbit_mission' not found"* about a package
+that had compiled successfully thirty seconds earlier. Units now source the
+workspace overlay in their own shell at spawn, so a project built at any moment
+is runnable immediately.
 
 ---
 

@@ -272,8 +272,58 @@ def exec_(cmd: str, timeout: float = 60, ros: bool = True, check: bool = False) 
 
 
 def walkerd_running() -> bool:
-    rc, _ = exec_("pgrep -r DRSW -f '[w]alkerd/__main__.py' >/dev/null", ros=False, timeout=30)
+    """
+    Is walkerd actually SERVING?
+
+    Checking only for the process is not enough, and got this wrong once: a
+    `pkill` followed immediately by `walker up` finds the dying process still
+    listed, reports "already running", starts nothing, and leaves walker
+    talking to a socket that no longer exists. The socket is the thing callers
+    depend on, so the socket is what gets checked -- along with the process, so
+    a stale socket file from a crashed walkerd is not mistaken for a live one.
+    """
+    if not paths.socket_path().exists():
+        return False
+    rc, _ = exec_("pgrep -r DRSW -f '[w]alkerd/__main__.py' >/dev/null",
+                  ros=False, timeout=30)
     return rc == 0
+
+
+def stop_walkerd(wait: float = 20.0) -> list[str]:
+    """
+    Stop walkerd and WAIT until it is really gone.
+
+    "Really gone" means both the process and its socket. Killing it and
+    starting another one immediately is a race that bit repeatedly during
+    development: the replacement sees the dying process (or its leftover
+    socket), concludes one is already running, starts nothing, and walker then
+    talks to a socket that is about to be unlinked.
+
+    Stopping walkerd stops its units too -- that is the point of a supervisor
+    -- so this is a real teardown, not a restart of the UI.
+    """
+    import time
+    notes = []
+    rc, _ = exec_("pgrep -r DRSW -f '[w]alkerd/__main__.py' >/dev/null",
+                  ros=False, timeout=30)
+    if rc != 0 and not paths.socket_path().exists():
+        return ["walkerd was not running"]
+
+    exec_("pkill -f '[w]alkerd/__main__.py'", ros=False, timeout=30)
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        rc, _ = exec_("pgrep -r DRSW -f '[w]alkerd/__main__.py' >/dev/null",
+                      ros=False, timeout=30)
+        if rc != 0 and not paths.socket_path().exists():
+            return ["walkerd stopped"]
+        time.sleep(0.5)
+
+    exec_("pkill -9 -f '[w]alkerd/__main__.py'", ros=False, timeout=30)
+    # A socket file outlives a SIGKILLed walkerd and would then make the next
+    # bind() fail with EADDRINUSE against nothing.
+    exec_(f"rm -f {paths.container_socket()}", ros=False, timeout=30)
+    notes.append("walkerd did not stop cleanly; killed it and removed its socket")
+    return notes
 
 
 def start_walkerd(wait: float = 15.0) -> list[str]:
@@ -287,6 +337,22 @@ def start_walkerd(wait: float = 15.0) -> list[str]:
     import time
     if walkerd_running():
         return ["walkerd already running"]
+
+    # Clear the ground first: a walkerd that is mid-exit still holds the socket
+    # path, and a stale socket file makes bind() fail with EADDRINUSE even
+    # though nothing is listening.
+    notes: list[str] = []
+    rc, _ = exec_("pgrep -r DRSW -f '[w]alkerd/__main__.py' >/dev/null",
+                  ros=False, timeout=30)
+    if rc == 0:
+        exec_("pkill -f '[w]alkerd/__main__.py'", ros=False, timeout=30)
+        for _ in range(20):
+            rc, _ = exec_("pgrep -r DRSW -f '[w]alkerd/__main__.py' >/dev/null",
+                          ros=False, timeout=30)
+            if rc != 0:
+                break
+            time.sleep(0.5)
+        notes.append("stopped a previous walkerd")
     # Invoked directly rather than through the image's /usr/local/bin/walkerd
     # shim. The shim is a convenience for a human in `walker shell`; walker
     # itself must not depend on it, because the shim is baked into the image
@@ -299,16 +365,25 @@ def start_walkerd(wait: float = 15.0) -> list[str]:
         "source /opt/ros/jazzy/setup.bash; "
         f"[ -f {paths.WORKSPACE}/install/setup.bash ] && "
         f"source {paths.WORKSPACE}/install/setup.bash; "
-        f"exec python3 -B {paths.WORKSPACE}/src/walkerd/__main__.py "
-        "> /tmp/walkerd.log 2>&1"
+        # setsid + nohup: walkerd must outlive the exec session that started
+        # it. `docker exec -d` returns immediately, but the process it started
+        # stays in that session's process group -- so when the docker client is
+        # killed (a CI step timing out, a terminal closing, an interrupted
+        # script) the group gets SIGTERM and walkerd shuts down cleanly and
+        # invisibly. The symptom is a supervisor that "keeps dying" with an
+        # empty log and a container that has not restarted.
+        #
+        # Its own session means only walkerd's own lifecycle stops it.
+        f"setsid nohup python3 -B {paths.WORKSPACE}/src/walkerd/__main__.py "
+        "> /tmp/walkerd.log 2>&1 < /dev/null &"
     )
     subprocess.Popen(
         engine() + ["exec", "-d", paths.CONTAINER, "bash", "-c", cmd],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + wait
     while time.time() < deadline:
-        if paths.socket_path().exists() and walkerd_running():
-            return ["walkerd up"]
+        if walkerd_running():
+            return notes + ["walkerd up"]
         time.sleep(0.5)
     rc, out = exec_("tail -5 /tmp/walkerd.log", ros=False, timeout=30)
     raise DockerError("walkerd did not start. Its last words:\n    " +

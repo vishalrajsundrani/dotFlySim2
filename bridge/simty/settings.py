@@ -157,7 +157,24 @@ class Settings:
     # -- safety: both default OFF. Arming an aircraft, even a simulated one,
     #    is an explicit operator action, never a side effect of starting a
     #    bridge.
-    auto_offboard: bool = False
+    # ── auto_offboard: True in V2, False in V1, and the difference matters ──
+    #
+    # This is what makes PX4 actually enter OFFBOARD when setpoints start
+    # arriving. Without it a mission takes authority, takes off, streams
+    # velocity commands at 20 Hz, and PX4 stays in whatever mode it was in --
+    # everything looks connected and nothing steers. It is the single most
+    # confusing way for a project to fail.
+    #
+    # V1 defaulted it off because the bridge also served a real Manifold flying
+    # a real aircraft, where silently engaging offboard on incoming setpoints
+    # would be dangerous. An operator turned it on deliberately, per session,
+    # by entering "project testing mode" from the bridge console.
+    #
+    # V2's bridge exists ONLY to let missions fly this simulation. There is no
+    # aircraft to endanger and no other mode to be in, so requiring a separate
+    # opt-in was ceremony that could only be forgotten -- and when forgotten,
+    # produced exactly the failure above.
+    auto_offboard: bool = True
     auto_arm: bool = False
     offboard_hz: float = 10.0
     rc_timeout_s: float = 1.0

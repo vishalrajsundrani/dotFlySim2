@@ -351,7 +351,7 @@ class Daemon:
                     return
                 unit.start()
 
-            unit.mark(STARTING, "preparing (build + bridge project mode)")
+            unit.mark(STARTING, "building and starting — see its terminal")
             threading.Thread(target=prepare_and_start, daemon=True,
                              name="prepare-project").start()
             return {"ok": True, "accepted": True,
@@ -388,47 +388,39 @@ class Daemon:
         # the binary. Running a stale binary is the failure that wastes the
         # most time: the mission runs, behaves like the old code, and nothing
         # says why.
-        if st["state"] in ("unbuilt", "stale") or args.get("rebuild"):
-            self.server.broadcast({"ev": "log", "unit": "project", "level": "info",
-                                   "t": time.time(),
-                                   "text": f"building {name} ({st['detail']})"})
-            ok, out = projects.build(name)
-            for line in out.splitlines()[-12:]:
-                self.server.broadcast({"ev": "log", "unit": "project",
-                                       "level": "info" if ok else "warn",
-                                       "t": time.time(), "text": line})
-            if not ok:
-                return f"{name} failed to build; see the log"
+        # THE BUILD RUNS INSIDE THE UNIT, not here.
+        #
+        # Building in walkerd sent compiler output to the socket as log events,
+        # so the mission's own terminal opened only after the build had
+        # finished and showed none of it. A build failure was then a one-line
+        # "failed to build; see the log" with the actual error somewhere else.
+        #
+        # Putting the build in the unit's command means its terminal carries
+        # the whole story in order: what is being built, the compiler's output,
+        # and then the mission's own logs -- which is what you want open when a
+        # mission misbehaves.
+        needs_build = st["state"] in ("unbuilt", "stale") or bool(args.get("rebuild"))
 
         unit = self.units["project"]
-        unit.spec.argv = projects.run_argv(name, args.get("params"))
+        unit.spec.argv = projects.run_argv(name, args.get("params"),
+                                           build=needs_build,
+                                           why=st.get("detail", ""))
         unit.spec.description = f"{name} — wrapper surface only"
         self.selection["project"] = name
 
-        # PUT THE BRIDGE IN PROJECT MODE BEFORE THE MISSION STARTS.
+        # NO PROJECT MODE SWITCHING. The bridge is ready for missions the
+        # moment it is up.
         #
-        # Without this the mission runs, takes authority, takes off, and then
-        # sits publishing velocity setpoints that go nowhere, because
-        # auto_offboard defaults to False and PX4 never leaves its current
-        # mode. The symptom is the mission's own timeout -- "PX4 never
-        # switched to SDK_CTRL" -- which names neither the bridge nor the
-        # setting. Observed exactly that on the first end-to-end flight.
+        # V1 needed a per-session "project testing mode" because the same
+        # bridge also served a real Manifold: it enabled the telemetry routes,
+        # set the services to SERVE, picked one setpoint route and turned
+        # auto_offboard on. In V2 the surface policy already enables every
+        # route and serves every service (finding F-1), and auto_offboard is
+        # the bridge's default (settings.py) -- so the whole dance reduced to a
+        # four-second pause that could only fail.
         #
-        # Which setpoint route to arm comes from the project's own
-        # project.conf, so a mission that steers in the body frame
-        # (demo_camera_track) gets the body-frame route rather than the
-        # ground-frame default.
-        setpoint = _SETPOINT_ALIASES.get(
-            projects.conf(name).get("SETPOINT", "velocity").lower(), "velocity")
-        if not self.watch.send_control(f"project value=on setpoint={setpoint}"):
-            return ("the bridge did not accept project mode (is it running?) -- "
-                    "without it PX4 will never switch to offboard")
-        # node.py applies one endpoint mutation per tick, so the table is not
-        # fully in place the instant the message is accepted.
-        time.sleep(4.0)
-        self.server.broadcast({"ev": "log", "unit": "project", "level": "info",
-                               "t": time.time(),
-                               "text": f"bridge in project mode, setpoint={setpoint}"})
+        # Starting a project is therefore exactly: build it if it needs
+        # building, then run it.
         return ""
 
     def op_cameras(self, args: dict) -> dict:

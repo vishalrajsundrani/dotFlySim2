@@ -24,6 +24,7 @@ from . import paths, scan
 from .client import Client, WalkerdError
 
 RUNNING = "running"
+STARTING = "starting"
 
 # Units that get their own terminal window the moment they start.
 #
@@ -99,15 +100,15 @@ class App:
             if kind == "unit":
                 name, state = ev["name"], ev.get("state")
                 self.units[name] = ev
-                # EVERY NOISY UNIT GETS ITS OWN WINDOW, automatically.
-                #
-                # These are the units whose output is worth watching live and
-                # too long to fit in the dashboard's log pane: Gazebo and PX4's
-                # console, the bridge's route table, RViz's complaints, QGC's
-                # link messages, a mission's step transitions. Opening the
-                # window when the unit starts is what the operator would do by
-                # hand a second later anyway.
-                if (state == RUNNING and name in TERMINAL_UNITS
+                # A window per noisy unit (see TERMINAL_UNITS), opened at
+                # STARTING rather than at running. The difference is the
+                # whole point for a project: its unit spends its first minute
+                # compiling, and a window that appears only once the mission is
+                # running shows none of the build. The same holds for the
+                # simulation, whose most interesting output -- Gazebo loading
+                # the world, PX4 booting, which airframe it chose -- all happens
+                # before it is ready.
+                if (state in (STARTING, RUNNING) and name in TERMINAL_UNITS
                         and name not in self.opened):
                     self.opened.add(name)
                     threading.Thread(target=self.open_terminal, args=(name,),

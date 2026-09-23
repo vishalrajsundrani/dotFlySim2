@@ -114,17 +114,29 @@ def build(name: str, timeout: float = 600.0) -> tuple[bool, str]:
     return cp.returncode == 0, out.strip()[-1500:]
 
 
-def run_argv(name: str, params: dict | None = None) -> list[str]:
+def run_argv(name: str, params: dict | None = None,
+             build: bool = False, why: str = "") -> list[str]:
     """
-    How to launch the mission.
+    The whole life of a mission, as one shell command: build it, then fly it.
 
-    `ros2 run` rather than the binary directly: it resolves the package's
-    environment, and a project that loads a config or an RViz file from its own
-    share/ directory then finds it.
+    WHY THE BUILD IS HERE AND NOT IN THE SUPERVISOR
+    -----------------------------------------------
+    Building in walkerd sent the compiler's output to the socket as log events,
+    which meant the mission's terminal opened *after* the build and showed none
+    of it. A failure became a one-line "failed to build; see the log", with the
+    actual error in a different place from the window you were looking at.
 
-    Parameters are passed the ROS way (--ros-args -p k:=v) so a mission's
-    declare_parameter defaults stay in the code, where CPP_DESIGN.md says they
-    belong, and walker only overrides them.
+    Run here, the unit's terminal carries the story in order: what is being
+    built and why, every line the compiler said, then the mission's own output.
+    That is the window you want open when something misbehaves.
+
+    THE OVERLAY IS SOURCED AT SPAWN, NOT INHERITED. walkerd sources
+    ~/ws/install/setup.bash when IT starts; a mission built afterwards is not
+    in that environment, and `ros2 run` then answers "Package not found" about
+    a package that compiled thirty seconds earlier.
+
+    `set +u` around the sourcing for the usual reason: ROS's setup.bash reads
+    $AMENT_TRACE_SETUP_FILES with no default.
     """
     args = ""
     if params:
@@ -135,24 +147,36 @@ def run_argv(name: str, params: dict | None = None) -> list[str]:
             parts.append(f"-p {k}:={v}")
         args = " --ros-args " + " ".join(parts)
 
-    # THE OVERLAY IS SOURCED AT SPAWN, NOT INHERITED.
-    #
-    # walkerd sources ~/ws/install/setup.bash when IT starts. A mission built
-    # afterwards is not in that environment, and `ros2 run` answers
-    # "Package 'demo_orbit_mission' not found" about a package that was
-    # compiled successfully thirty seconds earlier -- which reads as a build
-    # failure and is not one.
-    #
-    # Sourcing inside the unit's own shell means a project built at any point
-    # is runnable immediately, with no walkerd restart.
-    #
-    # `set +u` around it for the usual reason: ROS's setup.bash reads
-    # $AMENT_TRACE_SETUP_FILES with no default.
-    return ["/bin/bash", "-c",
-            "set +u; source /opt/ros/jazzy/setup.bash; "
-            f"source {WS}/install/setup.bash; "
-            f"exec ros2 run {name} {executable_of(name)}{args}"]
+    lines = [
+        "set +u",
+        "source /opt/ros/jazzy/setup.bash",
+        f"cd {WS}",
+    ]
+    if build:
+        lines += [
+            f'echo "=== building {name} ({why}) ==="',
+            # No `set -e`: the explicit check below reports a build failure in
+            # words, where a bare non-zero exit would leave the terminal
+            # showing compiler errors with no statement of what just happened.
+            f"colcon build --packages-select {name} --symlink-install "
+            "--cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo",
+            "rc=$?",
+            'if [ "$rc" != "0" ]; then',
+            f'    echo "=== {name} FAILED TO BUILD (exit $rc) ==="',
+            '    echo "    The compiler output is above. Fix it and press p again."',
+            "    exit $rc",
+            "fi",
+            f'echo "=== built {name} ==="',
+        ]
+    else:
+        lines.append(f'echo "=== {name} is up to date, not rebuilding ==="')
 
+    lines += [
+        f"source {WS}/install/setup.bash",
+        f'echo "=== running {name}{args} ==="',
+        f"exec ros2 run {name} {executable_of(name)}{args}",
+    ]
+    return ["/bin/bash", "-c", "\n".join(lines)]
 
 def conf(name: str) -> dict:
     """project.conf, read as DATA. Never sourced -- see walkerui/scan.py."""

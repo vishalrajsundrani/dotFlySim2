@@ -207,9 +207,10 @@ SETTINGS: tuple[SettingRule, ...] = (
     SettingRule(
         # The headline capability of V2: proved in SPIKE-1, where a camera
         # group switched on mid-flight took CPU from 18.8% to 106% and back.
-        "cameras", ANYTIME, "which camera groups stream",
-        "camera groups are subscription-driven, so they can be switched during "
-        "a flight as well as before one"),
+        "cameras", ANYTIME, "which lenses render",
+        "cameras are subscription-driven, so any lens can be switched during a "
+        "flight; and with the simulation down the choice is recorded and "
+        "applied the moment it starts"),
     SettingRule(
         "lens", SIM_RUNNING, "which payload lens feeds the stream",
         "there is nothing to switch between until the cameras exist"),

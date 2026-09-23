@@ -2105,6 +2105,52 @@ terminals (ptyxis, gnome-terminal) and xterm support it; where it is ignored,
 
 ---
 
+## Appendix L — choosing cameras before the simulation runs
+
+The Cameras screen refused to do anything with the simulation down
+(*"there are no cameras until the simulation runs"*), which contradicted the
+gating table's own rule that cameras are editable **anytime**, and contradicted
+the original requirement that the four options exist *before* running. Choosing
+what the next run will render is a normal thing to do before starting it.
+
+Three things had to change.
+
+**The catalogue had to exist before the first run.** It was read from
+`compose.json`, which is only written when a simulation starts — so before the
+first run there was none, and after a run with a different drone it described
+the wrong aircraft. It now falls back to reading the chosen drone's own model
+files, reusing the composer's own SDF scanner so the screen and the simulation
+cannot disagree about which lenses exist.
+
+**The set had to be applied at start.** A choice made while the simulation is
+down is recorded and applied the moment it reaches running, so "enable cameras
+before running" means something.
+
+**Two bugs surfaced doing it**, both worth recording:
+
+*L-1 — a display label reached a validated argument.* Hand-picking cameras makes
+the label `custom (3)`, and `compose()` passed that straight to the composer's
+`--cameras`, which only accepted the four profile names. **The whole simulation
+then refused to start** — for a field nothing acts on. The camera choice does
+not change the composition at all (every sensor is composed either way, with
+`always_on=false`); the value is provenance, recorded in `compose.json` so a bag
+or a screenshot can be traced back to what was on. It is now documented and
+typed as a label rather than a switch.
+
+*L-2 — a QoS durability mismatch swallowed the set.* walkerd publishes the
+enabled set `TRANSIENT_LOCAL` (latched) so a manager that starts later adopts
+it. The manager subscribed `VOLATILE`. Those two **match**, so nothing warned —
+but a volatile reader receives no history, only samples published after it
+subscribed, and the manager is started at the same instant the set is published.
+It reliably missed it and rendered nothing while walker showed three cameras on.
+Matching the durability is what makes the feature work; walkerd also republishes
+a few seconds later as a brace.
+
+Measured afterwards: 3 cameras chosen with the simulation down, then started —
+`97.9 %` gz CPU with them rendering, `55.8 %` when switched off.
+
+---
+
 ## Appendix B — Decision log
 
 | Date | Decision | Effect |

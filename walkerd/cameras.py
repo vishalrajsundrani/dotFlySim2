@@ -22,8 +22,16 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 COMPOSE = os.path.expanduser("~/gz_runtime/compose.json")
+MODELS = os.path.expanduser("~/gz_models")
+
+# tools/ holds the composer, whose SDF scanning this reuses rather than
+# reimplementing. Two copies of "find the camera sensors in a model" would
+# drift, and the screen would then offer a lens the simulation does not have.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "tools"))
 
 # Pretty names and ordering. A camera absent from here still appears -- it just
 # sorts last and shows its raw sensor name, which is better than hiding a lens
@@ -49,13 +57,58 @@ def _load() -> dict:
         return {}
 
 
-def catalogue() -> list[dict]:
+def _from_models(drone: str) -> dict:
     """
-    Every camera in the current composition, described for the screen.
+    Read the camera sensors straight out of a drone's models.
 
-    Each entry: sensor, topic, group, label, detail, resolution.
+    WHY THIS EXISTS ALONGSIDE compose.json
+    ======================================
+    compose.json is written when a simulation STARTS, so before the first run
+    there is none -- and after a run with a different drone it describes the
+    wrong aircraft. Either way the Cameras screen would be empty or wrong at
+    exactly the moment somebody wants to choose what the next run will render.
+
+    So when a drone is named, the catalogue comes from that drone's own model
+    files, which exist as soon as the folder does. The composer's own scanner is
+    reused, so what the screen lists and what the simulation will carry cannot
+    disagree.
+    """
+    try:
+        import compose_sim
+    except ImportError:
+        return {}
+    try:
+        manifest = compose_sim.load_toml(os.path.join(MODELS, drone, "walker.toml"))
+    except SystemExit:
+        return {}
+    names = [drone] + [a["model"] for a in manifest.get("attachments", [])
+                       if a.get("model")]
+    topics: dict[str, dict] = {}
+    for name in names:
+        path = os.path.join(MODELS, name, "model.sdf")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                found = compose_sim.sensor_topics(fh.read())
+        except OSError:
+            continue
+        for sensor, (kind, topic) in found.items():
+            topics[sensor] = {"type": kind, "topic": topic}
+    return {"sensor_topics": topics, "drone": drone}
+
+
+def catalogue(drone: str = "") -> list[dict]:
+    """
+    Every camera the chosen drone carries, described for the screen.
+
+    Prefers the live composition when it matches the drone asked about, and
+    falls back to reading the model files -- so the screen works before the
+    first simulation has ever been started.
     """
     comp = _load()
+    if drone and comp.get("drone") != drone:
+        comp = _from_models(drone)
+    elif not comp and drone:
+        comp = _from_models(drone)
     out: list[dict] = []
     for sensor, info in sorted(comp.get("sensor_topics", {}).items()):
         if info.get("type") != "camera":
@@ -88,11 +141,11 @@ def catalogue() -> list[dict]:
     return out
 
 
-def topics_for_group(group: str) -> list[str]:
-    return [c["topic"] for c in catalogue() if c["group"] == group]
+def topics_for_group(group: str, drone: str = "") -> list[str]:
+    return [c["topic"] for c in catalogue(drone) if c["group"] == group]
 
 
-def profile_topics(profile: str) -> list[str]:
+def profile_topics(profile: str, drone: str = "") -> list[str]:
     """
     The old four profiles, expressed as sets of individual cameras.
 
@@ -101,7 +154,7 @@ def profile_topics(profile: str) -> list[str]:
     wanted. The wide FHD stream is the sensible default and the one the wrapper
     surface carries.
     """
-    cat = catalogue()
+    cat = catalogue(drone)
     if profile == "none":
         return []
     vision = [c["topic"] for c in cat if c["group"] == "vision"

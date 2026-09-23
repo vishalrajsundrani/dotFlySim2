@@ -43,7 +43,8 @@ import json
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                       ReliabilityPolicy, qos_profile_sensor_data)
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
@@ -63,7 +64,18 @@ class CameraManager(Node):
         self._active_pub = self.create_publisher(Image, ACTIVE_TOPIC,
                                                  qos_profile_sensor_data)
 
-        self.create_subscription(String, CONTROL_TOPIC, self._on_control, 10)
+        # TRANSIENT_LOCAL, to match walkerd's latched publisher.
+        #
+        # A VOLATILE reader matches a TRANSIENT_LOCAL writer but receives no
+        # HISTORY -- only samples published after it subscribed. This node is
+        # started at the same moment the set is published, so with a volatile
+        # subscription it reliably missed it and rendered nothing while walker
+        # showed three cameras on. Matching the durability is what makes a set
+        # chosen BEFORE the simulation started actually take effect.
+        latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.create_subscription(String, CONTROL_TOPIC, self._on_control, latched)
         self.get_logger().info(
             f"camera manager ready; waiting for {CONTROL_TOPIC}")
 

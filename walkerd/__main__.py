@@ -461,19 +461,24 @@ class Daemon:
         if not verdict.allowed:
             return {"ok": False, "error": "locked", "reason": verdict.reason,
                     "hint": verdict.hint}
-        if "sim" not in self.running():
-            return {"ok": False, "error": "no simulation",
-                    "reason": "there are no cameras until the simulation runs",
-                    "hint": "start the simulation first (s)"}
-
-        known = {c["topic"] for c in camreg.catalogue()}
+        # NO "START THE SIMULATION FIRST". Choosing which lenses the next run
+        # will render is a normal thing to do before starting it -- and the
+        # gating table has always said cameras are editable `anytime`. This
+        # check contradicted it and was simply wrong.
+        #
+        # With the simulation down, the choice is recorded and applied the
+        # moment it comes up (see _apply_cameras). With it up, it takes effect
+        # immediately. Same screen, same keys, both ways.
+        live = "sim" in self.running()
+        drone = self.selection.get("drone", "")
+        known = {c["topic"] for c in camreg.catalogue(drone)}
         before = set(self.enabled_cameras)
 
         if "profile" in args:
             profile = args["profile"]
             if profile not in ("none", "fisheye", "payload", "all"):
                 return {"ok": False, "error": "bad profile", "reason": profile}
-            self.enabled_cameras = set(camreg.profile_topics(profile))
+            self.enabled_cameras = set(camreg.profile_topics(profile, drone))
             self.selection["cameras"] = profile
         else:
             for topic in args.get("on", []):
@@ -496,24 +501,8 @@ class Daemon:
             # Something has to be rendering for it to feed anything.
             self.enabled_cameras.add(args["active"])
 
-        # The manager holds the subscriptions; the bridge routes the wrapper's
-        # own camera topics, which only matter when something is rendering.
-        unit = self.units["cameras"]
-        if self.enabled_cameras and unit.state not in (RUNNING, STARTING):
-            unit.start()
-        elif not self.enabled_cameras and unit.alive:
-            threading.Thread(target=unit.stop, daemon=True).start()
-
-        self.watch.publish_cameras(list(self.enabled_cameras),
-                                   self.selection.get("active_lens", ""))
-        for key in ("stereo_left_out", "stereo_right_out"):
-            on = any(t.endswith("/front/left/image_raw")
-                     or t.endswith("/front/right/image_raw")
-                     for t in self.enabled_cameras)
-            self.watch.send_control(f"enable route={key} value={1 if on else 0}")
-        payload_on = any("/camera/" in t for t in self.enabled_cameras)
-        self.watch.send_control(
-            f"enable route=main_camera_out value={1 if payload_on else 0}")
+        if live:
+            self._apply_cameras()
 
         added = sorted(self.enabled_cameras - before)
         removed = sorted(before - self.enabled_cameras)
@@ -527,10 +516,47 @@ class Daemon:
                 "added": added, "removed": removed,
                 "profile": self.selection["cameras"]}
 
+    def _apply_cameras(self) -> None:
+        """
+        Make the running simulation render exactly the chosen set.
+
+        Called when a camera is switched AND when the simulation reaches
+        running, so a set chosen while it was down is honoured on start rather
+        than silently forgotten -- which is what "enable cameras before running"
+        has to mean to be worth anything.
+        """
+        unit = self.units["cameras"]
+        if self.enabled_cameras and unit.state not in (RUNNING, STARTING):
+            unit.start()
+        elif not self.enabled_cameras and unit.alive:
+            threading.Thread(target=unit.stop, daemon=True).start()
+
+        # Published twice on purpose: once now, and once shortly after, because
+        # the manager may only just have been started above and a latched
+        # sample is the belt to that brace.
+        self.watch.publish_cameras(list(self.enabled_cameras),
+                                   self.selection.get("active_lens", ""))
+        threading.Timer(3.0, lambda: self.watch.publish_cameras(
+            list(self.enabled_cameras),
+            self.selection.get("active_lens", ""))).start()
+
+        # The wrapper's own camera topics only carry anything while something
+        # is rendering, so the bridge routes follow the set.
+        fisheye_on = any(t.endswith("/front/left/image_raw")
+                         or t.endswith("/front/right/image_raw")
+                         for t in self.enabled_cameras)
+        for key in ("stereo_left_out", "stereo_right_out"):
+            self.watch.send_control(
+                f"enable route={key} value={1 if fisheye_on else 0}")
+        payload_on = any("/camera/" in t for t in self.enabled_cameras)
+        self.watch.send_control(
+            f"enable route=main_camera_out value={1 if payload_on else 0}")
+
     def _profile_name(self) -> str:
         """Name the current set if it happens to be one of the shortcuts."""
+        drone = self.selection.get("drone", "")
         for profile in ("none", "fisheye", "payload", "all"):
-            if set(camreg.profile_topics(profile)) == self.enabled_cameras:
+            if set(camreg.profile_topics(profile, drone)) == self.enabled_cameras:
                 return profile
         return f"custom ({len(self.enabled_cameras)})"
 
@@ -554,9 +580,13 @@ class Daemon:
     def compose(self) -> str:
         """Run the composer for the current selection. Returns "" or an error."""
         s = self.selection
+        # The camera label is recorded, not acted on: every sensor is composed
+        # either way and which ones render is decided at run time. The ENABLED
+        # SET is what matters, and it is applied when the simulation comes up
+        # (see _apply_cameras).
         cmd = [sys.executable, os.path.join(TOOLS, "compose_sim.py"),
                "--drone", s["drone"], "--world", s["world"],
-               "--cameras", s["cameras"]]
+               "--cameras", str(s.get("cameras", "none"))]
         if s.get("qgc_video"):
             cmd.append("--qgc-video")
         cp = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
@@ -606,7 +636,8 @@ class Daemon:
         if op == "cameras":
             return self.op_cameras(req.get("args", {}) or {})
         if op == "camera_list":
-            return {"ok": True, "cameras": camreg.catalogue(),
+            return {"ok": True,
+                    "cameras": camreg.catalogue(self.selection.get("drone", "")),
                     "enabled": sorted(self.enabled_cameras),
                     "active": self.selection.get("active_lens", "")}
         if op == "projects":
@@ -679,9 +710,22 @@ class Daemon:
 
         def lock_watch():
             tick = 0
+            sim_was = ""
             while True:
                 try:
                     self._sync_flight_lock()
+                    # A camera set chosen while the simulation was down is
+                    # applied the moment it comes up.
+                    sim_now = self.units["sim"].state
+                    if sim_now == RUNNING and sim_was != RUNNING:
+                        if self.enabled_cameras:
+                            self._apply_cameras()
+                            self.server.broadcast({
+                                "ev": "log", "unit": "cameras", "level": "info",
+                                "t": time.time(),
+                                "text": f"applied {len(self.enabled_cameras)} "
+                                        "camera(s) chosen before start"})
+                    sim_was = sim_now
                     # 5 Hz to the panel: fast enough to feel live, slow enough
                     # that the panel never repaints faster than a person reads.
                     if tick % 1 == 0:

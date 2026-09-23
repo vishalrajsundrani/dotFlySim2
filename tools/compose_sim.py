@@ -440,9 +440,22 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Build the simulation about to run.")
     p.add_argument("--drone", required=True)
     p.add_argument("--world", required=True)
-    p.add_argument("--cameras", default="none", choices=CAMERA_PROFILES,
-                   help="which camera groups stream at start-up (all sensors "
-                        "are present either way; this only sets who subscribes)")
+    # A LABEL, NOT A SWITCH -- and the distinction is load bearing.
+    #
+    # Every camera sensor is composed in either way, with always_on=false, and
+    # which ones render is decided at run time by who subscribes. So this value
+    # changes nothing about the composition: it is recorded in compose.json as
+    # provenance, so a bag or a screenshot can be traced back to what was on.
+    #
+    # It therefore accepts any label, not just the four profile names. Walker
+    # now lets a lens be switched on its own, so the honest label for a
+    # hand-picked set is something like "custom (3)" -- and rejecting that made
+    # the whole simulation refuse to start, which is a very poor outcome for a
+    # field nothing reads.
+    p.add_argument("--cameras", default="none", metavar="LABEL",
+                   help="label recorded in compose.json describing which "
+                        "cameras were chosen; does not change the composition "
+                        f"(the four shortcuts are {', '.join(CAMERA_PROFILES)})")
     p.add_argument("--qgc-video", action="store_true",
                    help="load GstCameraSystem so QGC can receive a stream")
     p.add_argument("--models", default=DEFAULT_MODELS)
@@ -538,7 +551,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"composed {a.drone} in {a.world}  ->  {a.out}")
     print(f"  models staged     : {', '.join(staged)}")
     print(f"  cameras relaxed   : {len(relaxed)} sensor(s) set always_on=false")
-    print(f"  camera profile    : {a.cameras} (subscription-driven; all sensors present)")
+    print(f"  cameras chosen    : {a.cameras} "
+          f"(subscription-driven; every sensor is present either way)")
     print(f"  airframe          : {af_id}_gz_{a.drone}  ({len(dman.get('airframe', {}).get('params', {}))} params)")
     print(f"  world             : {world_out}  (gz world name: {wman['gz_world_name']})")
     print(f"  GstCameraSystem   : {'loaded (QGC video)' if not gst_dropped else 'NOT loaded (keeps switched-off cameras free)'}")

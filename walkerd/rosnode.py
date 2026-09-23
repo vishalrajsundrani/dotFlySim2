@@ -77,11 +77,19 @@ class RosWatcher:
         self._lock = threading.Lock()
         self._node = None
         self._control = None      # publisher onto /simty/control
+        self._panel_state = None  # publisher onto /walker/state (the RViz panel)
+        self._panel_cmd = None    # subscription on /walker/control
+        self.on_panel_command = None   # set by the daemon
         self._exec = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.error = ""
         self.missing_types: list[str] = []
+        # Last-known values the RViz panel shows. Kept here because this is the
+        # one place already subscribed to the wrapper surface.
+        self.last_height = 0.0
+        self.last_armed = False
+        self.last_mode = ""
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -122,15 +130,53 @@ class RosWatcher:
             # it over the socket. One verb per message -- see simty/control.py.
             from std_msgs.msg import String
             self._control = self._node.create_publisher(String, "/simty/control", 10)
+
+            # THE RVIZ PANEL'S ENTIRE INTERFACE: one state topic out, one
+            # command topic in.
+            #
+            # V1's panels each held their own subscriptions to raw wrapper
+            # topics and repainted from ROS callbacks arriving at 50 Hz. This
+            # publishes ONE pre-digested document at 5 Hz, so the panel does no
+            # parsing, no rate limiting and no repaint faster than a person can
+            # read. See walker_rviz_panel/.
+            #
+            # TRANSIENT_LOCAL so a panel that opens later gets the current
+            # state immediately instead of a blank widget until the next tick.
+            from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                                   ReliabilityPolicy)
+            latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                                 history=HistoryPolicy.KEEP_LAST, depth=1)
+            self._panel_state = self._node.create_publisher(
+                String, "/walker/state", latched)
+
+            def _on_cmd(msg):
+                cb = self.on_panel_command
+                if cb:
+                    try:
+                        cb(msg.data)
+                    except Exception:
+                        pass
+
+            self._panel_cmd = self._node.create_subscription(
+                String, "/walker/control", _on_cmd, 10)
             for key, _n, topics, type_str, qos, _w in WATCH:
                 cls = self._import(type_str)
                 if cls is None:
                     self.missing_types.append(type_str)
                     continue
 
-                def cb(_msg, k=key):
+                def cb(msg, k=key):
                     with self._lock:
                         self._stamps[k].append(time.monotonic())
+                    if k == "w_height":
+                        self.last_height = float(getattr(msg, "data", 0.0))
+                    elif k == "w_status":
+                        # FlightStatus: 0 stopped, 1 on ground, 2 in air.
+                        fs = int(getattr(msg, "flight_status", 0))
+                        self.last_armed = fs != 0
+                        self.last_mode = {0: "STOPPED", 1: "ON_GROUND",
+                                          2: "ON_AIR"}.get(fs, "?")
 
                 for topic in ([topics] if isinstance(topics, str) else topics):
                     self._node.create_subscription(cls, topic, cb, self._qos(qos))
@@ -188,6 +234,37 @@ class RosWatcher:
         msg.data = text
         self._control.publish(msg)
         return True
+
+    def call_wrapper_service(self, name: str, timeout: float = 5.0) -> bool:
+        """
+        Call a std_srvs/Trigger on the wrapper surface, fire and forget.
+
+        Used by the RViz panel's buttons. Not waited on: a button that freezes
+        RViz until a service answers is worse than one whose effect shows up in
+        the telemetry a moment later.
+        """
+        if self._node is None:
+            return False
+        try:
+            from std_srvs.srv import Trigger
+            client = self._node.create_client(
+                Trigger, f"/wrapper/psdk_ros2/{name}")
+            if not client.wait_for_service(timeout_sec=timeout):
+                return False
+            client.call_async(Trigger.Request())
+            return True
+        except Exception:
+            return False
+
+    def publish_panel_state(self, doc: dict) -> None:
+        """Push one state document to the RViz panel. Cheap; called at 5 Hz."""
+        if self._panel_state is None:
+            return
+        import json
+        from std_msgs.msg import String
+        msg = String()
+        msg.data = json.dumps(doc, separators=(",", ":"))
+        self._panel_state.publish(msg)
 
     # ── reading ──────────────────────────────────────────────────────────────
 

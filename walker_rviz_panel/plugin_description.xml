@@ -1,0 +1,10 @@
+<library path="walker_rviz_panel">
+  <class name="walker_rviz_panel/WalkerPanel"
+         type="walker_rviz_panel::WalkerPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      dotFlySim2 walker panel: aircraft state and the four actions worth having
+      without leaving the 3D view.
+    </description>
+  </class>
+</library>

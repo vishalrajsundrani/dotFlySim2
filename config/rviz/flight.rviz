@@ -6,6 +6,10 @@ Panels:
       Splitter Ratio: 0.5
   - Class: rviz_common/Views
     Name: Views
+  # The walker dock: aircraft state and the four actions worth having without
+  # leaving the 3D view. See walker_rviz_panel/.
+  - Class: walker_rviz_panel/WalkerPanel
+    Name: Walker
 Visualization Manager:
   Class: ""
   Displays:

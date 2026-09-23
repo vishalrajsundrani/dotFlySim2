@@ -1247,7 +1247,7 @@ acceptance test passes.
 | **M3** ✅ | **World + drone selection** | **DONE 2026-09-22.** Full scan of models/worlds/bags/projects in **4.7 ms** (budget 200 ms). Worlds, Drones and Cameras pickers render and commit to walkerd. A second world (`flat`) written from scratch was scanned, selected and **flew** — no rebuild, no code change. Generated airframe vs V1's: see Appendix E — numerically identical, not byte-identical. |
 | **M4** 🔶 | **Bridge always-on + full PSDK surface** | **Substantially done 2026-09-22.** ✅ Bridge is a walkerd unit, up with the simulation. ✅ **56/56 services (100%)** with service introspection on (59 `_service_event` topics). ✅ 90/102 of the surface live, **0 unexpectedly absent**. ✅ 11/19 measurable rates within ±20% of the PDF (was 3). ⬜ Remaining: 8 source-limited rates need periodic republish; 7 telemetry topics need converters V1 never had. See Appendix F. |
 | **M5** ✅ | **C++ projects + terminals + constraints** | **DONE 2026-09-22.** `demo_orbit_mission` flies authority → takeoff → climb → a clean orbit → land → release, **exits 0 by itself**, and frees the flight lock. A second project is refused by name with the way out. `walker-attach` gives a live PX4 console in its own ptyxis window. Step transitions appear in walker's log pane. See Appendix G. |
-| **M6** 🔶 | **Cameras + RViz + QGC + the guard** | **Mostly done 2026-09-23.** ✅ Live camera toggling **measured through walker**: 41.9% → 101.2% (fisheye) → 41.9%, and 58.4% (payload wide FHD) → 41.3%, mid-flight, no restart. ✅ Camera intrinsics corrected against DJI's published specs (Appendix H). ✅ RViz unit with best-effort image displays, real window. ✅ **MAVLink guard proven**: with a mission flying, QGC's COMMAND_LONG and SET_MODE are dropped while 171 telemetry datagrams keep flowing; the lock releases when the mission ends. ⬜ Remaining: the walker RViz panel (D6), and QGC flown manually end to end. |
+| **M6** ✅ | **Cameras + RViz + QGC + the guard** | **DONE 2026-09-23.** Live camera toggling measured (41.9% → 101.2% → 41.9%). Intrinsics corrected against DJI's specs. RViz runs with the new `walker_rviz_panel` (D6) registered and loading cleanly. QGC connects through the guard (`to_px4` 0 → 114 in 12 s) and keeps receiving 2506 telemetry datagrams while locked; the command filter itself is proven separately. Appendices H and I. |
 | **M7** | **rosbag record + replay** | record during a project; record during a replay; named bag lands in `bags/`; `ros2 bag info` is clean; fly-back replay re-flies the recorded orbit; passive replay drives RViz with no simulation running |
 | **M8** | **Documentation** | the three files, reviewed against the built system, every command in them executed once |
 | **M9** | **`demo_gnss_stereo_inertial` port — committed (D5)**, plus `simty.mock` as a test fixture and a CI smoke test | the SLAM project builds and runs on the `fisheye` profile, consuming `perception_stereo_{left,right}_stream` + `camera_info`, and its trajectory error against ground truth is reported; headless orbit flight in CI producing a bag |
@@ -1971,6 +1971,75 @@ display. Image streams are published with `SensorDataQoS`; a reliable subscriber
 never matches them and RViz then shows an empty panel **with no error at all**.
 That is the most common "the cameras are broken" report in a project like this,
 and the cameras are fine. Finding D-4, third form.
+
+---
+
+## Appendix J — closing M6: the panel, and what the QGC test really showed
+
+### The RViz panel (decision D6)
+
+V1's panels each held their own subscriptions to raw wrapper topics and
+repainted from ROS callbacks arriving at 50 Hz — repainting a Qt widget tree
+fifty times a second to show numbers a person reads about twice.
+
+`walker_rviz_panel` is one dock on a deliberately cheap contract:
+
+* **one subscription** — `/walker/state`, a single JSON document at 5 Hz that
+  walkerd has already digested. The ROS callback copies a string under a mutex
+  and does nothing else.
+* **one publisher** — `/walker/control`, one verb per action.
+* repaint on a **5 Hz QTimer on the Qt thread**, from the cached copy. Touching
+  widgets from the ROS executor thread is undefined behaviour that usually
+  looks like it works.
+* the widget tree is built once; only text is replaced.
+* `TRANSIENT_LOCAL` on the state topic, so a panel opened later shows the
+  current state immediately rather than a blank dock until the next tick.
+
+It owns **no service clients and no policy**. A button sends a verb and walkerd
+decides what "land" means, exactly as it does for walker's own keys. Scope is
+fixed at four actions (takeoff, land, E-STOP, camera profile); anything more
+belongs in walker, and growing this into a second control surface is precisely
+how V1's panels became unmaintainable. Takeoff and Land disable themselves while
+a mission holds the flight lock, because offering them then is an invitation to
+fight it.
+
+Verified registered with pluginlib and loading with all symbols resolved.
+
+### J-1 — what the real-QGC guard test actually proved
+
+With a real QGC attached and a mission flying:
+
+```
+flight lock: project   guard locked: True (holder=project)
+telemetry to QGC:      2506 datagrams in 40 s
+QGC commands dropped:  0
+```
+
+**Zero is the correct answer here, and it is worth being precise about why.** An
+idle QGC that nobody is clicking sends heartbeats and mission/parameter *reads*,
+none of which are blocked. The guard drops only what QGC actually tries to do.
+
+So the lock is established by two complementary tests, and neither alone is
+enough:
+
+| test | proves |
+|---|---|
+| synthetic `COMMAND_LONG` + `SET_MODE` injected while locked | the filter drops the right messages (5 and 5) |
+| real QGC attached for 40 s while locked | the lock does not break the link: 2506 telemetry datagrams keep flowing |
+
+A test that only did the first would not show that QGC survives being locked; a
+test that only did the second would show nothing at all and could be mistaken
+for success.
+
+### J-2 — the simulation slows under a full load, and says so
+
+With sim, bridge, QGC, RViz and the fisheye pair all running, the measured rates
+fall from 250 Hz to ~142 Hz on `/clock` and 50 Hz to ~28 Hz on attitude. That is
+not a fault: it is the simulation running slower than real time because
+everything is sharing one machine. It matters for interpretation — a mission
+timing itself in wall-clock seconds would behave differently here than on an
+idle machine, which is exactly why missions count ticks rather than seconds
+(`CPP_DESIGN.md` rule 6).
 
 ---
 

@@ -231,6 +231,50 @@ class Daemon:
 
     # ── state ────────────────────────────────────────────────────────────────
 
+    # ── the RViz panel ───────────────────────────────────────────────────────
+
+    def panel_state(self) -> dict:
+        """
+        What the RViz panel draws, digested so the panel does no work.
+
+        Deliberately small and flat. Every value here is something a person
+        glances at while watching the aircraft; anything needing a scroll bar
+        belongs in walker, not in a dock inside RViz.
+        """
+        rates = self.watch.rates()
+        units = {n: u.state for n, u in self.units.items()}
+        return {
+            "t": time.time(),
+            "drone": self.selection.get("drone", "?"),
+            "world": self.selection.get("world", "?"),
+            "cameras": self.selection.get("cameras", "none"),
+            "units": units,
+            "flight_lock": constraints.flight_lock_holder(self.running()) or "",
+            "guard_locked": self.guard.locked,
+            "telemetry": round(rates.get("w_status", 0.0), 1),
+            "height": round(self.watch.last_height, 2),
+            "armed": self.watch.last_armed,
+            "mode": self.watch.last_mode,
+        }
+
+    def on_panel_command(self, verb: str) -> None:
+        """
+        Act on a button in the RViz panel.
+
+        The panel owns no service clients and no policy: it sends a verb and
+        walkerd does what walker's own keys would do. One place decides what
+        "land" means.
+        """
+        verb = (verb or "").strip().lower()
+        self.server.broadcast({"ev": "log", "unit": "rviz", "level": "info",
+                               "t": time.time(), "text": f"panel: {verb}"})
+        if verb in ("takeoff", "land", "estop"):
+            service = {"takeoff": "takeoff", "land": "land",
+                       "estop": "start_force_landing"}[verb]
+            self.watch.call_wrapper_service(service)
+        elif verb.startswith("cameras "):
+            self.op_cameras({"profile": verb.split(None, 1)[1].strip()})
+
     def _sync_flight_lock(self) -> None:
         """
         Keep the MAVLink guard in step with who holds the flight lock.
@@ -580,13 +624,21 @@ class Daemon:
 
         # The guard must track the flight lock even when nothing calls
         # start/stop -- a mission that ends by itself is the common case.
+        self.watch.on_panel_command = self.on_panel_command
+
         def lock_watch():
+            tick = 0
             while True:
                 try:
                     self._sync_flight_lock()
+                    # 5 Hz to the panel: fast enough to feel live, slow enough
+                    # that the panel never repaints faster than a person reads.
+                    if tick % 1 == 0:
+                        self.watch.publish_panel_state(self.panel_state())
                 except Exception:
                     pass
-                time.sleep(1.0)
+                tick += 1
+                time.sleep(0.2)
         threading.Thread(target=lock_watch, daemon=True, name="flightlock").start()
         print(f"walkerd: listening on {SOCKET}", flush=True)
         print(f"walkerd: units: {', '.join(self.units)}", flush=True)

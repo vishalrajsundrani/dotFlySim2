@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>walker_rviz_panel</name>
+  <version>2.0.0</version>
+  <description>
+    One RViz dock for dotFlySim2: aircraft state, height, camera profile and the
+    flight lock, plus takeoff, land, E-STOP and camera switching. Reads one
+    digested state message at 5 Hz and sends one verb per action, so it holds no
+    policy of its own.
+  </description>
+  <maintainer email="dotfly0@gmail.com">dotFly Engineering</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rviz_common</depend>
+  <depend>std_msgs</depend>
+  <depend>qtbase5-dev</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <rviz_common plugin="${prefix}/plugin_description.xml"/>
+  </export>
+</package>

@@ -2043,6 +2043,68 @@ idle machine, which is exactly why missions count ticks rather than seconds
 
 ---
 
+## Appendix K — per-camera control, and the two ways to start a mission
+
+### K-1 — every lens switches on its own
+
+Group switches ("fisheye" / "payload") could not express what people actually
+want — a tele lens at preview resolution plus the downward fisheye, say — so
+they are now shortcuts over a set, not the unit of control.
+
+The catalogue is built from `compose.json`, which the composer already writes
+for whatever drone is loaded, so the screen is correct for a drone added
+tomorrow with no list to fall out of date. **19 cameras** on the m4e:
+
+* 12 payload — 3 lenses (wide, medium tele, tele) × 4 tiers (photo, 4K, FHD,
+  preview)
+* 7 vision — forward pair, **backward pair, lateral pair, downward**, all newly
+  modelled from DJI's published figures (90° forward/back and lateral, 160°
+  downward; intrinsics derived as `fx = (w/2)/tan(hfov/2)`, not guessed)
+
+Measured, toggling them one at a time on a running simulation:
+
+| what is on | gz CPU |
+|---|---|
+| nothing | ~41 % |
+| one fisheye (downward, 160°) | ~40 % |
+| + rear-left fisheye | 99.8 % |
+| + tele at preview | 102.8 % |
+| + wide at 4K | 103.0 % |
+| all off again | 41.0 % |
+
+`simsupport/camera_manager.py` holds one subscription per switched-on camera
+and nothing else — the subscription *is* the switch, because the composer sets
+`always_on=false` and the bridge row is lazy. Its callback deliberately does
+nothing except for the one payload lens designated active, which it republishes
+to `/drone/camera/active/image_raw` for the wrapper's single
+`main_camera_stream`.
+
+**RViz is now a camera switch too.** `config/rviz/cameras.rviz` carries one
+Image display per camera, **all disabled**: enabling a display subscribes, and
+subscribing is what makes the lens render. Ticking a box in RViz turns that
+camera on; unticking it gives the GPU time back. Opening it with everything
+enabled would switch all 19 on at once, which is why the generator writes them
+off.
+
+### K-2 — Enter rebuilds, Shift+Enter reuses
+
+* **Enter** always rebuilds. When you are iterating on a mission that is what
+  you want every time; the alternative is running yesterday's binary because a
+  timestamp comparison disagreed with you.
+* **Shift+Enter** (or `b`) reuses the existing build, and only compiles when
+  there is no binary at all. Saves ~60 s when re-flying an unchanged mission
+  with different parameters.
+
+**A terminal cannot tell Enter from Shift+Enter by default** — both send byte
+13, and the modifier is simply not on the wire. walker requests xterm's
+`modifyOtherKeys` mode 2 at start-up, which makes Shift+Enter arrive as
+`ESC [ 27;2;13 ~`, and turns it off again on exit (leaving a terminal in that
+mode makes other programs see escape sequences where they expect keys). VTE
+terminals (ptyxis, gnome-terminal) and xterm support it; where it is ignored,
+`b` does the same thing and always works.
+
+---
+
 ## Appendix B — Decision log
 
 | Date | Decision | Effect |

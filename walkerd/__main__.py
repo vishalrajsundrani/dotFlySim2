@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import constraints                      # noqa: E402
 import probes                           # noqa: E402
+import cameras as camreg                # noqa: E402
 import projects                         # noqa: E402
 from mavguard import MavGuard           # noqa: E402
 from rosnode import RosWatcher          # noqa: E402
@@ -118,6 +119,10 @@ class Daemon:
                           # turn it off, and start_sim.sh falls back to
                           # headless by itself when DISPLAY does not answer.
                           "gui": True}
+        # Topics of the cameras currently switched on. The set, not a profile:
+        # every lens is individually controllable and a profile is only a
+        # shortcut for a particular set.
+        self.enabled_cameras: set[str] = set()
         self._define_units()
 
     # ── the unit table ───────────────────────────────────────────────────────
@@ -192,12 +197,13 @@ class Daemon:
             argv=["/bin/bash", "-c",
                   "set +u; source /opt/ros/jazzy/setup.bash; "
                   f"source {WS}/install/setup.bash 2>/dev/null; "
-                  f"exec python3 -u {SIMSUPPORT}/camera_switcher.py"],
+                  f"exec python3 -u {SIMSUPPORT}/camera_manager.py"],
             cwd=SIMSUPPORT,
             ready=None,
             stop_signal=signal.SIGINT,
             stop_timeout=10.0,
-            description="payload lens selector: holds exactly one camera subscription",
+            description="holds one subscription per switched-on camera, which is "
+                        "what makes Gazebo render it",
             log_rules=[LogRule(r"lens|mode|zoom|active", "info")],
         ))
 
@@ -399,7 +405,20 @@ class Daemon:
         # the whole story in order: what is being built, the compiler's output,
         # and then the mission's own logs -- which is what you want open when a
         # mission misbehaves.
-        needs_build = st["state"] in ("unbuilt", "stale") or bool(args.get("rebuild"))
+        # WHAT "REBUILD" MEANS, from the two ways a mission is started.
+        #
+        #   enter          rebuild always. You are iterating on the code, and
+        #                  the alternative is running yesterday's binary because
+        #                  a timestamp comparison disagreed with you.
+        #   shift+enter    reuse what is built. Skips ~60 s when you are
+        #                  re-flying an unchanged mission with new parameters.
+        #
+        # Either way a project with NO binary is built, because there is
+        # nothing else to run.
+        if args.get("rebuild", True):
+            needs_build = True
+        else:
+            needs_build = st["state"] in ("unbuilt", "missing")
 
         unit = self.units["project"]
         unit.spec.argv = projects.run_argv(name, args.get("params"),
@@ -425,12 +444,18 @@ class Daemon:
 
     def op_cameras(self, args: dict) -> dict:
         """
-        Switch camera groups, lens and tier -- live, during a flight.
+        Switch cameras -- individually, or by profile shortcut. Live.
 
-        Nothing here restarts anything. A group goes on by making something
-        subscribe and off by making it stop; Gazebo follows within a sensor
-        period. This is the capability SPIKE-1 established: measured, a group
-        switched on took the simulation from 18.8% CPU to 106% and back again.
+        Accepts any of:
+            {"profile": "fisheye"}            the four shortcuts
+            {"on": [topic, ...]}              switch these on
+            {"off": [topic, ...]}             switch these off
+            {"toggle": topic}                 flip one
+            {"active": topic}                 which payload lens feeds
+                                              the wrapper's main_camera_stream
+
+        Nothing restarts. A camera goes on by making the manager subscribe and
+        off by making it stop; Gazebo follows within a sensor period.
         """
         verdict = constraints.can_edit("cameras", self.running())
         if not verdict.allowed:
@@ -441,43 +466,73 @@ class Daemon:
                     "reason": "there are no cameras until the simulation runs",
                     "hint": "start the simulation first (s)"}
 
-        profile = args.get("profile")
-        if profile:
+        known = {c["topic"] for c in camreg.catalogue()}
+        before = set(self.enabled_cameras)
+
+        if "profile" in args:
+            profile = args["profile"]
             if profile not in ("none", "fisheye", "payload", "all"):
                 return {"ok": False, "error": "bad profile", "reason": profile}
-            wanted = {"fisheye": profile in ("fisheye", "all"),
-                      "payload": profile in ("payload", "all")}
+            self.enabled_cameras = set(camreg.profile_topics(profile))
             self.selection["cameras"] = profile
         else:
-            wanted = {g: bool(args[g]) for g in ("fisheye", "payload") if g in args}
+            for topic in args.get("on", []):
+                if topic in known:
+                    self.enabled_cameras.add(topic)
+            for topic in args.get("off", []):
+                self.enabled_cameras.discard(topic)
+            if args.get("toggle"):
+                topic = args["toggle"]
+                if topic in self.enabled_cameras:
+                    self.enabled_cameras.discard(topic)
+                elif topic in known:
+                    self.enabled_cameras.add(topic)
+            # A hand-picked set is no longer one of the four shortcuts, and
+            # saying "fisheye" when three lenses are on would be a lie.
+            self.selection["cameras"] = self._profile_name()
 
-        acted = []
-        for group, on in wanted.items():
-            for key in CAMERA_ROUTES[group]:
-                self.watch.send_control(f"enable route={key} value={1 if on else 0}")
-            if group == "payload":
-                # The switcher is what actually holds a lens subscription, so
-                # the payload group is only really off once it has stopped.
-                unit = self.units["cameras"]
-                if on and unit.state not in (RUNNING, STARTING):
-                    unit.start()
-                elif not on and unit.alive:
-                    threading.Thread(target=unit.stop, daemon=True).start()
-            acted.append(f"{group} {'on' if on else 'off'}")
+        if args.get("active"):
+            self.selection["active_lens"] = args["active"]
+            # Something has to be rendering for it to feed anything.
+            self.enabled_cameras.add(args["active"])
 
-        # Lens and tier go through the bridge's own camera verb, which
-        # publishes onto the switcher's command topics.
-        if args.get("lens"):
-            self.watch.send_control(f"camera lens={args['lens']}")
-            acted.append(f"lens {args['lens']}")
-        if args.get("tier"):
-            self.watch.send_control(f"camera mode={args['tier']}")
-            acted.append(f"tier {args['tier']}")
+        # The manager holds the subscriptions; the bridge routes the wrapper's
+        # own camera topics, which only matter when something is rendering.
+        unit = self.units["cameras"]
+        if self.enabled_cameras and unit.state not in (RUNNING, STARTING):
+            unit.start()
+        elif not self.enabled_cameras and unit.alive:
+            threading.Thread(target=unit.stop, daemon=True).start()
 
+        self.watch.publish_cameras(list(self.enabled_cameras),
+                                   self.selection.get("active_lens", ""))
+        for key in ("stereo_left_out", "stereo_right_out"):
+            on = any(t.endswith("/front/left/image_raw")
+                     or t.endswith("/front/right/image_raw")
+                     for t in self.enabled_cameras)
+            self.watch.send_control(f"enable route={key} value={1 if on else 0}")
+        payload_on = any("/camera/" in t for t in self.enabled_cameras)
+        self.watch.send_control(
+            f"enable route=main_camera_out value={1 if payload_on else 0}")
+
+        added = sorted(self.enabled_cameras - before)
+        removed = sorted(before - self.enabled_cameras)
         self.server.broadcast({"ev": "selection", **self.selection})
-        self.server.broadcast({"ev": "log", "unit": "cameras", "level": "info",
-                               "t": time.time(), "text": "cameras: " + ", ".join(acted)})
-        return {"ok": True, "applied": acted}
+        self.server.broadcast({
+            "ev": "log", "unit": "cameras", "level": "info", "t": time.time(),
+            "text": (f"{len(self.enabled_cameras)} camera(s) on"
+                     + (f"; +{len(added)}" if added else "")
+                     + (f"; -{len(removed)}" if removed else ""))})
+        return {"ok": True, "enabled": sorted(self.enabled_cameras),
+                "added": added, "removed": removed,
+                "profile": self.selection["cameras"]}
+
+    def _profile_name(self) -> str:
+        """Name the current set if it happens to be one of the shortcuts."""
+        for profile in ("none", "fisheye", "payload", "all"):
+            if set(camreg.profile_topics(profile)) == self.enabled_cameras:
+                return profile
+        return f"custom ({len(self.enabled_cameras)})"
 
     def op_stop(self, req: dict) -> dict:
         name = req.get("unit", "")
@@ -550,6 +605,10 @@ class Daemon:
                     "watcher_error": self.watch.error}
         if op == "cameras":
             return self.op_cameras(req.get("args", {}) or {})
+        if op == "camera_list":
+            return {"ok": True, "cameras": camreg.catalogue(),
+                    "enabled": sorted(self.enabled_cameras),
+                    "active": self.selection.get("active_lens", "")}
         if op == "projects":
             return {"ok": True, "projects": projects.listing()}
         if op == "build":

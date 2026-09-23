@@ -79,6 +79,7 @@ class RosWatcher:
         self._control = None      # publisher onto /simty/control
         self._panel_state = None  # publisher onto /walker/state (the RViz panel)
         self._panel_cmd = None    # subscription on /walker/control
+        self._cameras = None      # publisher onto /walker/cameras/enabled
         self.on_panel_command = None   # set by the daemon
         self._exec = None
         self._thread: threading.Thread | None = None
@@ -149,6 +150,11 @@ class RosWatcher:
                                  history=HistoryPolicy.KEEP_LAST, depth=1)
             self._panel_state = self._node.create_publisher(
                 String, "/walker/state", latched)
+            # The camera manager's whole interface: the complete desired set,
+            # latched so a manager that (re)starts adopts it immediately
+            # instead of rendering nothing until the next change.
+            self._cameras = self._node.create_publisher(
+                String, "/walker/cameras/enabled", latched)
 
             def _on_cmd(msg):
                 cb = self.on_panel_command
@@ -255,6 +261,16 @@ class RosWatcher:
             return True
         except Exception:
             return False
+
+    def publish_cameras(self, enabled: list[str], active: str = "") -> None:
+        """Tell the camera manager exactly which lenses should be rendering."""
+        if self._cameras is None:
+            return
+        import json
+        from std_msgs.msg import String
+        msg = String()
+        msg.data = json.dumps({"enabled": sorted(enabled), "active": active})
+        self._cameras.publish(msg)
 
     def publish_panel_state(self, doc: dict) -> None:
         """Push one state document to the RViz panel. Cheap; called at 5 Hz."""

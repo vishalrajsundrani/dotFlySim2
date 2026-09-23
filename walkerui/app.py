@@ -78,6 +78,7 @@ class App:
         self.status_until = 0.0
         self.links: list[dict] = []
         self.editable: dict = {}
+        self.cam_enabled: set[str] = set()
         self.busy: set[str] = set()
         # The picker overlays the dashboard rather than replacing the app's
         # state, so events keep arriving and the simulation keeps running
@@ -276,11 +277,20 @@ class App:
                     error="" if state in ("built", "stale", "unbuilt") else r.get("detail", "")))
             current = self.selection.get("project", "")
         elif kind == "cameras":
-            items = [scan.Entry(name=p, path=paths.REPO, kind="camera",
-                                title=_CAMERA_TITLES[p][0],
-                                detail=_CAMERA_TITLES[p][1])
-                     for p in scan.CAMERA_PROFILES]
-            current = self.selection.get("cameras", "none")
+            # EVERY LENS, INDIVIDUALLY. The four profiles remain as one-key
+            # shortcuts because that is how people talk about the cameras, but
+            # they cannot express "tele at preview plus the downward fisheye",
+            # which is a perfectly reasonable thing to want.
+            try:
+                r = self.c.call("camera_list")
+            except WalkerdError as e:
+                self.say(str(e).splitlines()[0]); return
+            self.cam_enabled = set(r.get("enabled", []))
+            items = [scan.Entry(name=cam["topic"], path=paths.REPO, kind="camera",
+                                title=cam["label"], detail=cam["detail"],
+                                meta={"group": cam["group"]})
+                     for cam in r.get("cameras", [])]
+            current = ""
         else:
             items = scan.get("worlds" if kind == "world" else "drones", force=True)
             current = self.selection.get(kind, "")
@@ -300,15 +310,54 @@ class App:
         elif ch in (curses.KEY_DOWN,) or k == "j":
             pk["idx"] = (pk["idx"] + 1) % n
         elif ch in (curses.KEY_ENTER, 10, 13):
-            self.commit_picker()
+            # Enter ALWAYS rebuilds. For a mission you are iterating on, that
+            # is what you want every time: the alternative is running yesterday's
+            # binary because a timestamp comparison disagreed with you.
+            self.commit_picker(rebuild=True)
+        elif ch == -2 or k == "b":
+            # Shift+Enter (or `b`, which always works -- see the note on
+            # modifyOtherKeys) reuses an existing build and only compiles when
+            # there is nothing to run.
+            self.commit_picker(rebuild=False)
         elif k in ("\x1b", "q"):
             self.picker = None
+        elif pk["kind"] == "cameras" and k == " ":
+            self.toggle_camera(pk["items"][pk["idx"]].name)
+        elif pk["kind"] == "cameras" and k in "1234":
+            self.apply_camera_profile(["none", "fisheye", "payload", "all"][int(k) - 1])
         elif ch == curses.KEY_F5 or k == "5":
             scan.invalidate()
             self.open_picker(pk["kind"])
             self.say("rescanned")
 
-    def commit_picker(self) -> None:
+    def toggle_camera(self, topic: str) -> None:
+        """Flip one lens. Takes effect immediately on a running simulation."""
+        def go():
+            r = self.c.call("cameras", args={"toggle": topic})
+            if r.get("ok"):
+                with self._lock:
+                    self.cam_enabled = set(r.get("enabled", []))
+                    self.selection["cameras"] = r.get("profile", "custom")
+                on = topic in self.cam_enabled
+                self.say(f"{'on ' if on else 'off'} {topic}"
+                         f"   ({len(self.cam_enabled)} rendering)", 5)
+            else:
+                self.say(f"cameras: {r.get('reason','?')}  [{r.get('hint','')}]", 10)
+        self.bg("cameras", go)
+
+    def apply_camera_profile(self, profile: str) -> None:
+        def go():
+            r = self.c.call("cameras", args={"profile": profile})
+            if r.get("ok"):
+                with self._lock:
+                    self.cam_enabled = set(r.get("enabled", []))
+                    self.selection["cameras"] = profile
+                self.say(f"{profile}: {len(self.cam_enabled)} camera(s) rendering", 6)
+            else:
+                self.say(f"cameras: {r.get('reason','?')}  [{r.get('hint','')}]", 10)
+        self.bg("cameras", go)
+
+    def commit_picker(self, rebuild: bool = True) -> None:
         pk = self.picker
         entry = pk["items"][pk["idx"]]
         if not entry.usable:
@@ -328,12 +377,18 @@ class App:
             # simulation is composed. That difference is the whole point of
             # subscription-driven rendering, and hiding it would make the two
             # cases look alike when they behave nothing alike.
+            if field == "cameras":
+                self.toggle_camera(entry.name)
+                return
             if field == "project":
-                r = self.c.start("project", package=entry.name)
+                r = self.c.start("project", package=entry.name, rebuild=rebuild)
                 if r.get("ok"):
                     with self._lock:
                         self.selection["project"] = entry.name
-                    self.say(f"{entry.name}: preparing (builds if stale, then flies)", 8)
+                    self.say(f"{entry.name}: "
+                             + ("rebuilding, then flying" if rebuild
+                                else "reusing the existing build" ) 
+                             + " — watch its terminal", 8)
                     for a in r.get("advisories", []):
                         self.say(a, 10)
                 else:
@@ -372,7 +427,8 @@ class App:
         h, w = s.getmaxyx()
         kind = pk["kind"]
         heading = {"world": "Worlds — worlds/", "drone": "Drones — models/",
-                   "cameras": "Camera profile",
+                   "cameras": ("Cameras — each lens switches on its own; "
+                               "RViz can then look through it"),
                    "project": "Projects — projects/   (enter builds if needed, then flies)"}[kind]
         self.put(0, 0, f" {heading} ".ljust(w),
                  curses.color_pair(C_HEAD) | curses.A_BOLD)
@@ -390,6 +446,14 @@ class App:
             mark = "›" if sel else " "
             self.put(y, 1, mark, curses.color_pair(C_KEY) | curses.A_BOLD)
             name = e.name[:20].ljust(21)
+            if kind == "cameras":
+                on = e.name in self.cam_enabled
+                self.put(y, 3, "[x]" if on else "[ ]",
+                         curses.color_pair(C_OK if on else C_DIM) | curses.A_BOLD)
+                self.put(y, 7, (e.title or "")[:24].ljust(25), attr)
+                self.put(y, 33, e.detail[:20].ljust(21), curses.color_pair(C_DIM))
+                self.put(y, 55, e.name[:max(0, w - 57)], curses.color_pair(C_DIM))
+                continue
             self.put(y, 3, name, attr | (curses.A_BOLD if e.usable else 0))
             self.put(y, 25, (e.title or "")[:30].ljust(31),
                      0 if e.usable else curses.color_pair(C_DIM))
@@ -402,8 +466,15 @@ class App:
 
         if self.status and time.time() < self.status_until:
             self.put(h - 2, 2, self.status, curses.color_pair(C_WARN))
-        bar = (" [↑↓/jk] move   [enter] choose   [F5] rescan   [esc] back "
-               "   • = current ")
+        if pk["kind"] == "cameras":
+            bar = (f" [space/enter] toggle   [1] none [2] fisheye [3] payload [4] all"
+                   f"   [esc] back      {len(self.cam_enabled)} rendering ")
+        elif pk["kind"] == "project":
+            bar = (" [↑↓/jk] move   [enter] rebuild + fly   [shift+enter / b] fly "
+                   "existing   [F5] rescan   [esc] back ")
+        else:
+            bar = (" [↑↓/jk] move   [enter] choose   [F5] rescan   [esc] back "
+                   "   • = current ")
         self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
 
     # ── drawing ──────────────────────────────────────────────────────────────
@@ -528,11 +599,41 @@ class App:
 
     # ── input ────────────────────────────────────────────────────────────────
 
+    def _read_modified(self) -> tuple[int, int] | None:
+        """
+        After an ESC, try to read a modifyOtherKeys sequence: ESC [ 27;m;k ~
+
+        Returns (modifier, key) or None, having consumed only what it read. A
+        bare ESC (the cancel key) arrives as an ESC with nothing behind it, and
+        getch returning -1 is how that is told apart.
+        """
+        buf = ""
+        for _ in range(12):
+            c = self.scr.getch()
+            if c == -1:
+                break
+            buf += chr(c)
+            if c == ord("~"):
+                break
+        if buf.startswith("[27;") and buf.endswith("~"):
+            try:
+                _, mod, key = buf[1:-1].split(";")
+                return int(mod), int(key)
+            except ValueError:
+                return None
+        return None
+
     def key(self, ch: int) -> None:
         try:
             k = chr(ch) if 0 <= ch < 0x110000 else ""
         except ValueError:
             k = ""
+        if ch == 27:
+            mod_key = self._read_modified()
+            if mod_key == SHIFT_ENTER[1:]:
+                ch, k = -2, ""          # -2 is walker's "Shift+Enter"
+            elif mod_key is not None:
+                return                  # some other modified key: ignore
         if self.confirm is not None:
             cf = self.confirm
             if k in [o[0] for o in cf["options"]]:
@@ -617,6 +718,13 @@ class App:
 
     def run(self) -> None:
         self.scr.nodelay(True)
+        # Ask for modified keys; harmless where unsupported.
+        try:
+            import sys as _sys
+            _sys.stdout.write(MODIFY_OTHER_KEYS_ON)
+            _sys.stdout.flush()
+        except Exception:
+            pass
         self.refresh_state()
         last_refresh = time.time()
         while not self.quit:
@@ -630,6 +738,12 @@ class App:
                 last_refresh = time.time()
             self.draw()
             time.sleep(0.05)
+        try:
+            import sys as _sys
+            _sys.stdout.write(MODIFY_OTHER_KEYS_OFF)
+            _sys.stdout.flush()
+        except Exception:
+            pass
 
 
 def dump(stdscr, settle: float = 6.0, keys: str = "", hold: float = 0.6) -> str:
@@ -676,6 +790,30 @@ def dump(stdscr, settle: float = 6.0, keys: str = "", hold: float = 0.6) -> str:
             rows.append("")
     client.close()
     return "\n".join(rows)
+
+
+# ── telling Shift+Enter from Enter ───────────────────────────────────────────
+#
+# A terminal sends the SAME byte (13) for Enter and Shift+Enter by default:
+# the modifier is simply not encoded, so no program can tell them apart. It is
+# not a curses limitation, it is what is on the wire.
+#
+# xterm's "modifyOtherKeys" mode changes that. Mode 2 makes modified keys arrive
+# as a CSI sequence carrying the modifier, so Shift+Enter becomes
+#
+#     ESC [ 27 ; 2 ; 13 ~
+#
+# VTE terminals (ptyxis, gnome-terminal) and xterm support it; others ignore
+# the request harmlessly. Where it is ignored, Shift+Enter is indistinguishable
+# from Enter, so `b` is documented as doing the same thing and always works.
+#
+# The mode is turned off again on exit -- leaving a terminal in it makes other
+# programs see escape sequences where they expect plain keys.
+MODIFY_OTHER_KEYS_ON = "\033[>4;2m"
+MODIFY_OTHER_KEYS_OFF = "\033[>4;0m"
+
+# ESC [ 27 ; <mod> ; <key> ~   -- mod 2 is Shift, key 13 is Enter.
+SHIFT_ENTER = (27, 2, 13)
 
 
 def _init_colours() -> None:

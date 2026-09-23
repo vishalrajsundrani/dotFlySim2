@@ -337,6 +337,185 @@
           </lens>
         </camera>
       </sensor>
+
+      <!-- ===================================================================
+           THE REST OF THE OMNIDIRECTIONAL VISION SYSTEM.
+
+           The M4E carries six low light fisheye lenses plus downward sensing.
+           Only the forward pair reaches the wrapper surface (psdk_ros2 streams
+           perception_stereo_left/right and nothing else), but the others are
+           modelled because walker can switch any camera on individually and
+           RViz can look through it, and because an obstacle avoidance node
+           under test needs something behind and beside the aircraft to see.
+
+           Every one of these is OFF unless something subscribes: the composer
+           sets always_on=false and ros_gz_bridge is lazy, so an unused lens
+           costs nothing. Measured in SPIKE-1.
+
+           FIELDS OF VIEW, from DJI's published figures:
+             forward / backward   90 deg H, 135 deg V, 0.4 to 200 m
+             lateral              90 deg H,  90 deg V, 0.5 to 200 m
+             downward            160 deg,             0.3 to  18.8 m
+
+           The 135 deg vertical of the forward and backward pairs is NOT
+           reproduced: these are square images, so Gazebo derives 90 deg
+           vertical from the aspect. Matching the published 704x704 stream was
+           judged more important than matching the lens.
+
+           Intrinsics are derived, not guessed: fx = (width/2) / tan(hfov/2),
+           with the principal point at the image centre.
+
+           Source: DJI Matrice 4 Series specifications, enterprise.dji.com
+           =================================================================== -->
+      <!-- Backward vision, left. 90 deg H per DJI's forward/backward figure. -->
+      <sensor name="perception_back_left" type="camera">
+        <pose>-0.30 0.045 0 0 0 3.1416</pose>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <topic>/drone/perception/back/left/image_raw</topic>
+        <gz_frame_id>perception_back_left</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.5708</horizontal_fov>
+          <image>
+            <width>704</width>
+            <height>704</height>
+            <format>L8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>200.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>352.0</fx>
+              <fy>352.0</fy>
+              <cx>352.0</cx>
+              <cy>352.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <!-- Backward vision, right. -->
+      <sensor name="perception_back_right" type="camera">
+        <pose>-0.30 -0.045 0 0 0 3.1416</pose>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <topic>/drone/perception/back/right/image_raw</topic>
+        <gz_frame_id>perception_back_right</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.5708</horizontal_fov>
+          <image>
+            <width>704</width>
+            <height>704</height>
+            <format>L8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>200.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>352.0</fx>
+              <fy>352.0</fy>
+              <cx>352.0</cx>
+              <cy>352.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <!-- Lateral vision, left. DJI: 90 H x 90 V, 0.5 to 200 m. -->
+      <sensor name="perception_left" type="camera">
+        <pose>0 0.12 0 0 0 1.5708</pose>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <topic>/drone/perception/left/image_raw</topic>
+        <gz_frame_id>perception_left</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.5708</horizontal_fov>
+          <image>
+            <width>704</width>
+            <height>704</height>
+            <format>L8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>200.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>352.0</fx>
+              <fy>352.0</fy>
+              <cx>352.0</cx>
+              <cy>352.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <!-- Lateral vision, right. -->
+      <sensor name="perception_right" type="camera">
+        <pose>0 -0.12 0 0 0 -1.5708</pose>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <topic>/drone/perception/right/image_raw</topic>
+        <gz_frame_id>perception_right</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.5708</horizontal_fov>
+          <image>
+            <width>704</width>
+            <height>704</height>
+            <format>L8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>200.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>352.0</fx>
+              <fy>352.0</fy>
+              <cx>352.0</cx>
+              <cy>352.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
+
+      <!-- Downward vision. DJI: 160 deg, 0.3 to 18.8 m. Used for landing and low-altitude hold. -->
+      <sensor name="perception_down" type="camera">
+        <pose>0 0 -0.04 0 1.5708 0</pose>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <topic>/drone/perception/down/image_raw</topic>
+        <gz_frame_id>perception_down</gz_frame_id>
+        <camera>
+          <horizontal_fov>2.7925</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>640</height>
+            <format>L8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>20.0</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>56.4</fx>
+              <fy>56.4</fy>
+              <cx>320.0</cx>
+              <cy>320.0</cy>
+              <s>0.0</s>
+            </intrinsics>
+          </lens>
+        </camera>
+      </sensor>
     </link>
 
     <link name="rotor_0">

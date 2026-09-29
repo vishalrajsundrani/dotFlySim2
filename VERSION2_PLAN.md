@@ -1249,7 +1249,7 @@ acceptance test passes.
 | **M5** ✅ | **C++ projects + terminals + constraints** | **DONE 2026-09-22.** `demo_orbit_mission` flies authority → takeoff → climb → a clean orbit → land → release, **exits 0 by itself**, and frees the flight lock. A second project is refused by name with the way out. `walker-attach` gives a live PX4 console in its own ptyxis window. Step transitions appear in walker's log pane. See Appendix G. |
 | **M6** ✅ | **Cameras + RViz + QGC + the guard** | **DONE 2026-09-23.** Live camera toggling measured (41.9% → 101.2% → 41.9%). Intrinsics corrected against DJI's specs. RViz runs with the new `walker_rviz_panel` (D6) registered and loading cleanly. QGC connects through the guard (`to_px4` 0 → 114 in 12 s) and keeps receiving 2506 telemetry datagrams while locked; the command filter itself is proven separately. Appendices H and I. |
 | **M7** | **rosbag record + replay** | record during a project; record during a replay; named bag lands in `bags/`; `ros2 bag info` is clean; fly-back replay re-flies the recorded orbit; passive replay drives RViz with no simulation running |
-| **M8** | **Documentation** | the three files, reviewed against the built system, every command in them executed once |
+| **M8** 🔶 | **Documentation** | **Written 2026-09-29** — README.md, CPP_DESIGN.md, ROS2_ARCHITECTURE.md (1 254 lines). Every command in them executed; the surface figures they quote re-measured against the live graph and one error found and fixed (6 simulation-only topics, not 4). ⬜ Rosbag (M7) and the SLAM project (M9) are deliberately excluded and marked as not-yet-present; both docs need a pass once those land. |
 | **M9** | **`demo_gnss_stereo_inertial` port — committed (D5)**, plus `simty.mock` as a test fixture and a CI smoke test | the SLAM project builds and runs on the `fisheye` profile, consuming `perception_stereo_{left,right}_stream` + `camera_info`, and its trajectory error against ground truth is reported; headless orbit flight in CI producing a bag |
 
 ---
@@ -2148,6 +2148,51 @@ a few seconds later as a brace.
 
 Measured afterwards: 3 cameras chosen with the simulation down, then started —
 `97.9 %` gz CPU with them rendering, `55.8 %` when switched off.
+
+---
+
+## Appendix M — M8: the three documents
+
+Written against the built system, not the plan. Every command in them was run;
+every figure re-measured against the live graph.
+
+| file | lines | covers |
+|---|---|---|
+| `README.md` | 370 | what it is, quick start, walker feature by feature, the constraint and gating tables, cameras, adding content, troubleshooting |
+| `CPP_DESIGN.md` | 467 | the nine rules and the failure each prevents, the skeleton, `demo_orbit_mission` annotated, command/service/telemetry reference, debugging, the hardware-porting checklist |
+| `ROS2_ARCHITECTURE.md` | 417 | node graph (ASCII + Mermaid), the PX4→wrapper route table with real sources and rate caps, all 41+5 topics, all 56 services, frames, QoS, time, discovery |
+
+### What verification caught
+
+Running the documented commands found one factual error: both docs claimed
+**4** topics were "published here, absent on a real M4E". The live graph says
+**6** — `gps_control_level` and `landing_gear_status` were missed. That matters
+because the list is precisely the set a mission must not depend on if it will
+ever fly hardware; an incomplete list is worse than none.
+
+The conformance output quoted in `ROS2_ARCHITECTURE.md` was re-run and matches
+exactly: 31/41 telemetry, 3/5 command, 56/56 services, 90/102 with 0
+unexpectedly absent, 59 `_service_event` topics.
+
+### What the docs deliberately do not claim
+
+`README.md` has a **"What is not here yet"** section naming rosbag record and
+replay (M7) and the SLAM project (M9), because the `record` and `replay` keys
+are visible in the keymap and somebody would otherwise hunt for them.
+
+Both documents also state the approximations plainly rather than burying them:
+the 7 unsynthesised topics, the 2 unconvertible command topics, the fisheye's
+90° vertical against a real 135°, and that the simulation runs slower than real
+time under load.
+
+### The theme worth carrying into M7
+
+Four of this project's hardest bugs were **QoS compatibility that produced no
+error**: `ros2 topic hz` reporting silence on a 250 Hz topic, RViz showing an
+empty image panel, a conformance check reporting 0/102, and a camera manager
+rendering nothing. `ROS2_ARCHITECTURE.md §8` states the two rules that prevent
+all four — subscribe Best Effort when in doubt, and match durability when a
+late-starting node must adopt existing state.
 
 ---
 

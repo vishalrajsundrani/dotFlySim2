@@ -95,6 +95,9 @@ class App:
         self.opened: set[str] = set()
         self.quit = False
         self.shutdown_on_quit = False
+        # What was last painted. A frame whose signature is unchanged is not
+        # painted again -- see draw().
+        self._painted: tuple | None = None
         self._lock = threading.RLock()
 
     # ── events from walkerd ──────────────────────────────────────────────────
@@ -211,6 +214,7 @@ class App:
     # ── a modal question ─────────────────────────────────────────────────────
 
     def ask(self, text: str, options: list[tuple[str, str]], on) -> None:
+        _hide_cursor()      # cheap insurance: a dialog must never blink
         """
         Put a question on screen. `options` is [(key, label)], `on(key)` acts.
 
@@ -236,12 +240,13 @@ class App:
         for i, (k, label) in enumerate(cf["options"]):
             self.put(top + 3 + i, left + 3, f"[{k}]  {label}",
                      curses.color_pair(C_HEAD))
-        self.scr.refresh()
+        self.scr.noutrefresh()
 
     # ── a modal text field ───────────────────────────────────────────────────
 
     def ask_text(self, text: str, hint: str, on, check=None,
                  value: str = "") -> None:
+        _hide_cursor()      # cheap insurance: a dialog must never blink
         """
         Ask for a line of text. `on(value)` acts; `check(value)` returns "" or
         a complaint, shown live as you type.
@@ -272,7 +277,7 @@ class App:
                      curses.color_pair(C_FAIL) | curses.A_BOLD)
         self.put(top + 6, left + 3, "[enter] confirm   [esc] cancel",
                  curses.color_pair(C_HEAD))
-        self.scr.refresh()
+        self.scr.noutrefresh()
 
     def prompt_key(self, k: str, ch: int) -> None:
         pr = self.prompt
@@ -670,7 +675,7 @@ class App:
             self.put(h - 2, 2, self.status, curses.color_pair(C_WARN))
         self.put(h - 1, 0, " [enter] replay this bag   [esc] back ".ljust(w),
                  curses.color_pair(C_HEAD))
-        self.scr.refresh()
+        self.scr.noutrefresh()
 
     def bag_key(self, k: str, ch: int) -> None:
         if ch == 27 or k == "q":
@@ -691,33 +696,81 @@ class App:
 
     # ── drawing ──────────────────────────────────────────────────────────────
 
-    def draw(self) -> None:
+    def _signature(self) -> tuple:
+        """
+        Everything that changes what is on screen.
+
+        The dashboard is alive -- uptimes tick, link rates move, log lines
+        arrive -- so a naive loop repaints 20 times a second. That is fine for
+        the dashboard and NOT fine underneath a modal: erasing and repainting
+        the whole screen every 50 ms drags the dialog through the repaint with
+        it, and the result reads as a blinking window.
+        
+        So a frame is painted only when this changes. While a prompt or a
+        # confirmation is open the signature deliberately IGNORES the live
+        # dashboard behind it and tracks only the dialog, which makes the
+        # dialog perfectly still while you type.
+        """
+        status = self.status if time.time() < self.status_until else ""
+        if self.prompt is not None:
+            pr = self.prompt
+            return ("prompt", pr["text"], pr["value"], pr["problem"], status)
+        if self.confirm is not None:
+            return ("confirm", self.confirm["text"], status)
+        if self.bag is not None:
+            return ("bag", self.bag.get("name"), status)
+        if self.picker is not None:
+            pk = self.picker
+            return ("picker", pk["kind"], pk["idx"], len(pk["items"]),
+                    tuple(sorted(self.cam_enabled)), status)
+        with self._lock:
+            units = tuple((u["name"], u["state"], int(u.get("uptime", 0)),
+                           u.get("detail", "")) for u in self.units.values())
+            links = tuple((l["name"], l["detail"]) for l in self.links)
+            sel = tuple(sorted((k, str(v)) for k, v in self.selection.items()))
+            edit = tuple(sorted(self.editable.items()))
+            log_n = len(self.log)
+            last = self.log[-1][3] if self.log else ""
+        return ("dash", units, links, sel, edit, log_n, last, status,
+                tuple(sorted(self.busy)))
+
+    def draw(self, force: bool = False) -> None:
+        sig = self._signature()
+        if not force and sig == self._painted:
+            return
+        self._painted = sig
+
         self.scr.erase()
         if self.prompt is not None:
             self._draw_dashboard()
             self.draw_prompt()
-            return
-        if self.bag is not None:
+        elif self.bag is not None:
             self.draw_bag()
-            return
-        if self.confirm is not None:
+        elif self.confirm is not None:
             # Drawn over the dashboard rather than instead of it, so the state
             # you are deciding about stays visible behind the question.
             self._draw_dashboard()
             self.draw_confirm()
-            return
-        if self.picker is not None:
+        elif self.picker is not None:
             self.draw_picker()
-            return
-        self._draw_dashboard()
-        self.scr.refresh()
+        else:
+            self._draw_dashboard()
+        # ONE update per frame.
+        #
+        # Every draw_* stages with noutrefresh rather than refresh: a refresh()
+        # inside one of them pushes a half-drawn screen, and two of them in a
+        # frame pushes two. Staging here as well is belt and braces, because
+        # doupdate() pushes nothing at all for a window that was never staged
+        # -- a path that forgot would simply render blank.
+        self.scr.noutrefresh()
+        curses.doupdate()
 
     def _draw_dashboard(self) -> None:
         s = self.scr
         h, w = s.getmaxyx()
         if h < 18 or w < 70:
             self.put(0, 0, "terminal too small (need 70x18)"[:w - 1])
-            s.refresh()
+            s.noutrefresh()
             return
 
         sel = self.selection
@@ -809,7 +862,7 @@ class App:
         bar = (" [s]im [b]ridge [p]roject [r]ec [R]eplay [c]ams [v]iz [q]gc "
                "[t]erm [?]help [Q]uit ")
         self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
-        s.refresh()
+        s.noutrefresh()
 
     def _key(self, y: int, x: int, key: str, label: str) -> None:
         if x < 4:
@@ -958,25 +1011,47 @@ class App:
 
     def run(self) -> None:
         self.scr.nodelay(True)
-        # Ask for modified keys; harmless where unsupported.
+
+        # THE CURSOR MUST STAY HIDDEN, and keeping it hidden takes more than
+        # one call to curs_set at start-up.
+        #
+        # The escape sequence below is written straight to stdout, behind
+        # curses' back, because there is no curses call for it. Terminals
+        # commonly reset state on an unrecognised or mode-changing sequence,
+        # and a terminal that turns the cursor back on leaves a blinking block
+        # sitting wherever the last character was drawn -- which, with a dialog
+        # open, is inside the dialog. That reads as "the window is blinking",
+        # and it is the cursor, not the window.
+        #
+        # So: write the sequence, then re-assert the cursor state, and tell
+        # curses it need not put the cursor anywhere in particular
+        # (leaveok) so it is not dragged around the screen on every repaint.
         try:
             import sys as _sys
             _sys.stdout.write(MODIFY_OTHER_KEYS_ON)
             _sys.stdout.flush()
         except Exception:
             pass
+        _hide_cursor()
+        try:
+            self.scr.leaveok(True)
+        except curses.error:
+            pass
         self.refresh_state()
         last_refresh = time.time()
         while not self.quit:
             ch = self.scr.getch()
-            if ch != -1:
+            pressed = ch != -1
+            if pressed:
                 self.key(ch)
             # A periodic resync: events keep the mirror current, but a probe
             # has to be asked for, and a reconnect needs a full snapshot.
             if time.time() - last_refresh > 2.0:
                 self.refresh_state()
                 last_refresh = time.time()
-            self.draw()
+            # A keypress always repaints, so a keystroke never waits on the
+            # signature noticing it.
+            self.draw(force=pressed)
             time.sleep(0.05)
         try:
             import sys as _sys
@@ -1056,8 +1131,21 @@ MODIFY_OTHER_KEYS_OFF = "\033[>4;0m"
 SHIFT_ENTER = (27, 2, 13)
 
 
+def _hide_cursor() -> None:
+    """
+    Hide the hardware cursor, tolerating terminals that refuse.
+
+    curs_set raises on a terminal with no civis capability, and an exception
+    here would take down the UI over a cosmetic detail.
+    """
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+
+
 def _init_colours() -> None:
-    curses.curs_set(0)
+    _hide_cursor()
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(C_OK, curses.COLOR_GREEN, -1)

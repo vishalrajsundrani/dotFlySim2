@@ -205,18 +205,29 @@ SETTINGS: tuple[SettingRule, ...] = (
         "time, and loading it later is not possible. It also holds camera "
         "subscriptions open, which is why it is not simply always on"),
     SettingRule(
-        # The headline capability of V2: proved in SPIKE-1, where a camera
-        # group switched on mid-flight took CPU from 18.8% to 106% and back.
-        "cameras", ANYTIME, "which lenses render",
-        "cameras are subscription-driven, so any lens can be switched during a "
-        "flight; and with the simulation down the choice is recorded and "
-        "applied the moment it starts"),
+        # DELIBERATELY NOT "anytime", though the mechanism would allow it.
+        #
+        # Rendering is subscription-driven, so a lens CAN be switched during a
+        # flight -- SPIKE-1 measured exactly that, 18.8% to 106% CPU and back.
+        # The capability is still there and walkerd still applies a change
+        # live if one is made.
+        #
+        # It is gated to "simulation stopped" as a matter of policy, not
+        # capability: switching a 4K lens on mid-flight takes GPU time away
+        # from the physics and can push the simulation below real time in the
+        # middle of a mission, which quietly changes the flight you were
+        # measuring. Choosing the camera set up front makes a run's cost
+        # constant for its whole duration.
+        "cameras", SIM_STOPPED, "which lenses render",
+        "the camera set is fixed for a run so its cost cannot change mid-flight; "
+        "choose it before starting, and it is applied the moment the simulation "
+        "comes up"),
     SettingRule(
-        "lens", SIM_RUNNING, "which payload lens feeds the stream",
-        "there is nothing to switch between until the cameras exist"),
+        "lens", SIM_STOPPED, "which payload lens feeds the stream",
+        "part of the camera set, and fixed for the same reason"),
     SettingRule(
-        "tier", SIM_RUNNING, "photo, 4K, FHD or preview",
-        "there is nothing to switch between until the cameras exist"),
+        "tier", SIM_STOPPED, "photo, 4K, FHD or preview",
+        "part of the camera set, and fixed for the same reason"),
 )
 
 _BY_NAME = {r.name: r for r in SETTINGS}

@@ -54,6 +54,14 @@ SIMSUPPORT = os.path.join(WS, "src", "simsupport")
 # subscribe (lazy:true), which makes Gazebo render the sensor (always_on=false).
 # That chain is the whole reason a camera group can be switched mid-flight --
 # see SPIKE-1.
+# Which bridge route carries which INDIVIDUAL camera onto the wrapper surface.
+# Taken from the routes' own sim_topic in bridge/simty/registry.py; if a route
+# is repointed there, change it here too.
+VIDEO_ROUTE_TOPICS = {
+    "stereo_left_out":  "/drone/perception/front/left/image_raw",
+    "stereo_right_out": "/drone/perception/front/right/image_raw",
+}
+
 CAMERA_ROUTES = {
     "fisheye": ("stereo_left_out", "stereo_right_out"),
     "payload": ("main_camera_out",),
@@ -461,14 +469,13 @@ class Daemon:
         if not verdict.allowed:
             return {"ok": False, "error": "locked", "reason": verdict.reason,
                     "hint": verdict.hint}
-        # NO "START THE SIMULATION FIRST". Choosing which lenses the next run
-        # will render is a normal thing to do before starting it -- and the
-        # gating table has always said cameras are editable `anytime`. This
-        # check contradicted it and was simply wrong.
+        # The gate above has already refused this if the simulation is
+        # running: the camera set is chosen before a run and fixed for its
+        # duration, so a run's rendering cost cannot change underneath a
+        # mission that is being measured.
         #
-        # With the simulation down, the choice is recorded and applied the
-        # moment it comes up (see _apply_cameras). With it up, it takes effect
-        # immediately. Same screen, same keys, both ways.
+        # `live` stays, because a set chosen while stopped still has to be
+        # applied the moment the simulation comes up.
         live = "sim" in self.running()
         drone = self.selection.get("drone", "")
         known = {c["topic"] for c in camreg.catalogue(drone)}
@@ -540,14 +547,25 @@ class Daemon:
             list(self.enabled_cameras),
             self.selection.get("active_lens", ""))).start()
 
-        # The wrapper's own camera topics only carry anything while something
-        # is rendering, so the bridge routes follow the set.
-        fisheye_on = any(t.endswith("/front/left/image_raw")
-                         or t.endswith("/front/right/image_raw")
-                         for t in self.enabled_cameras)
-        for key in ("stereo_left_out", "stereo_right_out"):
+        # EACH BRIDGE ROUTE FOLLOWS ITS OWN CAMERA, not a group flag.
+        #
+        # This was a real bug. Both stereo routes were driven from one
+        # "any front fisheye is on" flag, but they subscribe to DIFFERENT
+        # topics -- stereo_left_out to front/left, stereo_right_out to
+        # front/right. Switching on front-left therefore enabled the route
+        # that subscribes to front-RIGHT, which made Gazebo render a camera
+        # walker was showing as off. And it could not be switched off again,
+        # because the flag only went false once BOTH were off.
+        #
+        # The symptom was "a camera, once on, is always on".
+        for key, topic in VIDEO_ROUTE_TOPICS.items():
+            on = topic in self.enabled_cameras
             self.watch.send_control(
-                f"enable route={key} value={1 if fisheye_on else 0}")
+                f"enable route={key} value={1 if on else 0}")
+
+        # main_camera_out is the exception: it reads the camera manager's
+        # /drone/camera/active/image_raw rather than a lens directly, so it
+        # follows "is any payload lens on" rather than one topic.
         payload_on = any("/camera/" in t for t in self.enabled_cameras)
         self.watch.send_control(
             f"enable route=main_camera_out value={1 if payload_on else 0}")
@@ -710,22 +728,34 @@ class Daemon:
 
         def lock_watch():
             tick = 0
-            sim_was = ""
+            sim_was = bridge_was = ""
             while True:
                 try:
                     self._sync_flight_lock()
                     # A camera set chosen while the simulation was down is
                     # applied the moment it comes up.
+                    # Re-apply the camera set when EITHER the simulation or
+                    # the bridge comes up.
+                    #
+                    # The bridge matters as much as the simulation: the route
+                    # commands that put a camera's frames onto the wrapper
+                    # surface go to the bridge, and one started after the
+                    # simulation would never receive them. The symptom was a
+                    # lens rendering happily while
+                    # /wrapper/psdk_ros2/perception_stereo_left_stream stayed
+                    # silent, which reads as a broken bridge and is not.
                     sim_now = self.units["sim"].state
-                    if sim_now == RUNNING and sim_was != RUNNING:
-                        if self.enabled_cameras:
-                            self._apply_cameras()
-                            self.server.broadcast({
-                                "ev": "log", "unit": "cameras", "level": "info",
-                                "t": time.time(),
-                                "text": f"applied {len(self.enabled_cameras)} "
-                                        "camera(s) chosen before start"})
-                    sim_was = sim_now
+                    bridge_now = self.units["bridge"].state
+                    came_up = ((sim_now == RUNNING and sim_was != RUNNING) or
+                               (bridge_now == RUNNING and bridge_was != RUNNING))
+                    if came_up and self.enabled_cameras:
+                        self._apply_cameras()
+                        self.server.broadcast({
+                            "ev": "log", "unit": "cameras", "level": "info",
+                            "t": time.time(),
+                            "text": f"applied {len(self.enabled_cameras)} "
+                                    "camera(s) chosen before start"})
+                    sim_was, bridge_was = sim_now, bridge_now
                     # 5 Hz to the panel: fast enough to feel live, slow enough
                     # that the panel never repaints faster than a person reads.
                     if tick % 1 == 0:

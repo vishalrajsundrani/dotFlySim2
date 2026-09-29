@@ -230,8 +230,7 @@ reason instead of accepting them silently.
 | world, drone | sim **stopped** | composed at start; PX4 reads the airframe once, at boot |
 | Gazebo window | sim **stopped** | the client starts alongside the server |
 | QGC video | sim **stopped** | decides whether the video plugin is loaded |
-| **cameras** | **any time** | subscription-driven — switchable mid-flight, and a set chosen while stopped is applied at start |
-| lens, tier | sim **running** | nothing to switch between until the cameras exist |
+| **cameras, lens, tier** | sim **stopped** | the camera set is fixed for a run, so its cost cannot change under a mission you are measuring. Chosen before starting and applied the moment the simulation comes up |
 
 A locked setting shows `⨯ sim up` where its key would be.
 
@@ -239,11 +238,20 @@ A locked setting shows `⨯ sim up` where its key would be.
 
 ## 6. Cameras
 
-**Rendering is demand-driven.** Every camera is `always_on=false` in the
-composed model and its bridge row is lazy, so Gazebo renders a lens only while
-something is subscribed. Switching a camera on *is* subscribing to it.
+**Choose your cameras before you start the simulation.** The set is fixed for
+the duration of a run: `c` is locked while the simulation is up, and shows
+`⨯ sim up` where its key would be.
 
-Measured on a running simulation:
+That is a policy, not a limitation of the mechanism. Rendering is
+demand-driven — every camera is `always_on=false` in the composed model and its
+bridge row is lazy, so Gazebo renders a lens only while something is subscribed,
+and switching a camera on *is* subscribing to it. Switching a 4K lens on
+mid-flight therefore works, but it takes GPU time away from the physics and can
+push the simulation below real time in the middle of a mission, quietly changing
+the flight you were measuring. Fixing the set up front keeps a run's cost
+constant.
+
+The cost of each lens, measured:
 
 | what is on | Gazebo CPU |
 |---|---|
@@ -253,10 +261,11 @@ Measured on a running simulation:
 | four cameras | 103.0% |
 | all off again | 41.0% |
 
-Press `c` for **all 19 lenses individually** — 3 payload lenses × 4 tiers
-(photo, 4K, FHD, preview), plus 7 vision cameras (forward, backward and lateral
-pairs, and downward). `1`–`4` apply the shortcuts `none`, `fisheye`, `payload`,
-`all`; space toggles one.
+With the simulation stopped, press `c` for **all 19 lenses individually** —
+3 payload lenses × 4 tiers (photo, 4K, FHD, preview), plus 7 vision cameras
+(forward, backward and lateral pairs, and downward). `1`–`4` apply the
+shortcuts `none`, `fisheye`, `payload`, `all`; space toggles one. The set is
+applied when you press `s`.
 
 **RViz is a camera switch too.** `config/rviz/cameras.rviz` carries one Image
 display per camera, all disabled. Enabling a display subscribes, and

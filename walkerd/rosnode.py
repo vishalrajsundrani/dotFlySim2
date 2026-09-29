@@ -232,6 +232,17 @@ class RosWatcher:
         deadline = time.monotonic() + wait_for_bridge
         while time.monotonic() < deadline:
             if self._control.get_subscription_count() > 0:
+                # A SUBSCRIPTION APPEARING IS NOT THE SAME AS BEING READY TO
+                # RECEIVE. Publishing the instant the count goes non-zero
+                # races the rest of DDS matching, and the message is dropped
+                # silently -- this publisher is volatile, so there is no
+                # history to deliver late.
+                #
+                # Observed: of three route commands sent as the bridge came
+                # up, the FIRST vanished and the other two landed. The visible
+                # effect was a camera rendering while its wrapper topic stayed
+                # silent.
+                time.sleep(0.4)
                 break
             time.sleep(0.2)
         else:

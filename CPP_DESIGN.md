@@ -352,8 +352,9 @@ hardware on a real M4E, so there was never a conversion to inherit.
 
 **Only while a camera is on** — `main_camera_stream`, `fpv_camera_stream`,
 `perception_stereo_left_stream`, `perception_stereo_right_stream`. Enable the
-lens from walker's `c` screen, and set `CAMERAS=` in your `project.conf` so
-walker suggests the right profile.
+lens from walker's `c` screen **before starting the simulation** (the set is
+fixed for a run), and set `CAMERAS=` in your `project.conf` so walker suggests
+the right profile.
 
 Check the live surface at any time:
 

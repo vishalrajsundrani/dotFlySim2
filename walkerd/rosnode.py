@@ -273,6 +273,21 @@ class RosWatcher:
         except Exception:
             return False
 
+    def wrapper_service_names(self) -> list[str]:
+        """
+        Every /wrapper/psdk_ros2 service on the live graph.
+
+        Asked of the graph rather than hard-coded so a service added to the
+        bridge is recorded without anyone remembering to update a list.
+        """
+        if self._node is None:
+            return []
+        try:
+            return sorted(n for n, _ in self._node.get_service_names_and_types()
+                          if n.startswith("/wrapper/psdk_ros2/"))
+        except Exception:
+            return []
+
     def publish_cameras(self, enabled: list[str], active: str = "") -> None:
         """Tell the camera manager exactly which lenses should be rendering."""
         if self._cameras is None:

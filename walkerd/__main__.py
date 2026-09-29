@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import constraints                      # noqa: E402
 import probes                           # noqa: E402
+import bags as bagreg                   # noqa: E402
 import cameras as camreg                # noqa: E402
 import projects                         # noqa: E402
 from mavguard import MavGuard           # noqa: E402
@@ -243,6 +244,38 @@ class Daemon:
             log_rules=[LogRule(r"error|Error|failed|Connected", "info")],
         ))
 
+        add(UnitSpec(
+            name="record",
+            argv=["/bin/true"],          # rewritten per recording, see op_start
+            cwd=HOME,
+            ready=None,
+            # SIGINT, NOT SIGTERM. rosbag2 finalises the bag on Ctrl-C: it
+            # writes metadata.yaml and closes the mcap. A killed recorder
+            # leaves a directory `ros2 bag info` cannot read and `ros2 bag
+            # play` will not open -- the whole flight, lost at the last step.
+            stop_signal=signal.SIGINT,
+            stop_timeout=30.0,
+            description="ros2 bag record, writing straight into bags/",
+            log_rules=[
+                LogRule(r"^===", "info"),
+                LogRule(r"Recording|Listening|error|Error", "info"),
+            ],
+        ))
+
+        add(UnitSpec(
+            name="replay",
+            argv=["/bin/true"],          # rewritten per replay
+            cwd=HOME,
+            ready=None,
+            stop_signal=signal.SIGINT,
+            stop_timeout=15.0,
+            description="ros2 bag play onto the wrapper surface",
+            log_rules=[
+                LogRule(r"^===", "info"),
+                LogRule(r"error|Error|failed", "warn"),
+            ],
+        ))
+
     # ── state ────────────────────────────────────────────────────────────────
 
     # ── the RViz panel ───────────────────────────────────────────────────────
@@ -344,6 +377,16 @@ class Daemon:
             return {"ok": False, "error": "refused", "reason": verdict.reason,
                     "held_by": verdict.held_by, "hint": verdict.hint}
 
+        if name == "record":
+            err = self._prepare_record(req.get("args", {}) or {})
+            if err:
+                return {"ok": False, "error": "record", "reason": err}
+
+        if name == "replay":
+            err = self._prepare_replay(req.get("args", {}) or {})
+            if err:
+                return {"ok": False, "error": "replay", "reason": err}
+
         if name == "project":
             # PREPARING A PROJECT CAN TAKE MINUTES, so it does not happen
             # inside the request. A stale mission is rebuilt first (57 s is
@@ -385,6 +428,69 @@ class Daemon:
 
         unit.start()
         return {"ok": True, "advisories": list(verdict.advisories)}
+
+    def _prepare_record(self, args: dict) -> str:
+        """Point the recorder at a named bag. Returns "" or a reason."""
+        name = (args.get("name") or "").strip()
+        problem = bagreg.valid_name(name)
+        if problem:
+            return problem
+        scope = args.get("scope", "wrapper")
+        if scope not in bagreg.SCOPES:
+            return f"unknown scope '{scope}'"
+
+        # The wrapper service names, for --services. Asked of the live graph
+        # rather than hard-coded, so a service added to the bridge is recorded
+        # without anyone remembering to update a list here.
+        services: list[str] = []
+        if scope != "all":
+            services = self.watch.wrapper_service_names()
+            if not services:
+                self.server.broadcast({
+                    "ev": "log", "unit": "record", "level": "warn",
+                    "t": time.time(),
+                    "text": "no wrapper services on the graph - service CALLS "
+                            "will not be recorded, only topics"})
+
+        unit = self.units["record"]
+        unit.spec.argv = bagreg.record_argv(name, scope, services)
+        unit.spec.description = f"recording bags/{name} ({scope})"
+        self.selection["recording"] = name
+        return ""
+
+    def _prepare_replay(self, args: dict) -> str:
+        """Point the player at a bag, and get the bridge out of its way."""
+        name = (args.get("bag") or "").strip()
+        bag = bagreg.detail(name)
+        if not bag:
+            return f"no bag called '{name}' under bags/"
+        if bag.get("error"):
+            return bag["error"]
+
+        # THE BAG OWNS THE WRAPPER SURFACE WHILE IT PLAYS.
+        #
+        # Without this the bridge keeps publishing its own telemetry onto the
+        # same topics the bag is replaying, and a subscriber gets the two
+        # interleaved with nothing saying which is which. Replay mode switches
+        # the bridge's own routes off and restores them afterwards; the
+        # services stay served, so a caller still gets an answer.
+        if not self.watch.send_control("replay value=on"):
+            return ("the bridge did not accept replay mode (is it running?) - "
+                    "without it the bridge would publish over the recording")
+        time.sleep(6.0)    # one endpoint mutation per tick; replay touches all
+
+        unit = self.units["replay"]
+        unit.spec.argv = bagreg.play_argv(bag["path"],
+                                          float(args.get("rate", 1.0)),
+                                          bool(args.get("loop", False)))
+        kind = "fly-back" if bag["can_fly"] else "telemetry-only"
+        unit.spec.description = f"replaying {name} ({kind})"
+        self.selection["replaying"] = name
+        self.server.broadcast({
+            "ev": "log", "unit": "replay", "level": "info", "t": time.time(),
+            "text": (f"{name}: {kind}; bridge routes off so the bag owns the "
+                     f"surface")})
+        return ""
 
     def _prepare_project(self, args: dict) -> str:
         """
@@ -523,6 +629,34 @@ class Daemon:
                 "added": added, "removed": removed,
                 "profile": self.selection["cameras"]}
 
+    def _report_recording(self) -> None:
+        """
+        Say what was actually captured, once the recorder has closed the bag.
+
+        rosbag2 writes metadata.yaml when it finalises, so this runs after the
+        unit has stopped -- and if the file is missing, the recording is not
+        readable and saying so now is far better than discovering it on the
+        Bags screen a week later.
+        """
+        name = self.selection.get("recording", "")
+        if not name:
+            return
+        time.sleep(1.5)                       # let the finaliser land
+        bag = bagreg.detail(name)
+        if not bag or bag.get("error"):
+            self.server.broadcast({
+                "ev": "log", "unit": "record", "level": "warn", "t": time.time(),
+                "text": f"bags/{name} has no metadata.yaml - it may not be "
+                        f"readable. Try: ros2 bag reindex -s mcap bags/{name}"})
+            return
+        mins, secs = divmod(int(bag["duration_s"]), 60)
+        self.server.broadcast({
+            "ev": "log", "unit": "record", "level": "info", "t": time.time(),
+            "text": (f"bags/{name}: {mins}:{secs:02d}, {bag['messages']:,} msgs, "
+                     f"{bag['n_topics']} topics, {bag['n_services']} services, "
+                     f"{bag['size_bytes']/1e6:.1f} MB - "
+                     f"{'can fly back' if bag['can_fly'] else 'telemetry only'}")})
+
     def _apply_cameras(self) -> None:
         """
         Make the running simulation render exactly the chosen set.
@@ -589,8 +723,13 @@ class Daemon:
             # Hand the bridge its route table back. Leaving it in project mode
             # would leave the simulation quietly wide open -- auto_offboard on,
             # setpoint routes live -- for whatever runs next.
-            if name == "project":
-                self.watch.send_control("project value=off", wait_for_bridge=2.0)
+            if name == "replay":
+                # Give the bridge its own routes back. Left in replay mode it
+                # publishes nothing at all, and the next mission would sit
+                # waiting for telemetry that no longer comes.
+                self.watch.send_control("replay value=off", wait_for_bridge=2.0)
+            if name == "record":
+                self._report_recording()
 
         threading.Thread(target=go, daemon=True).start()
         return {"ok": True}
@@ -658,6 +797,16 @@ class Daemon:
                     "cameras": camreg.catalogue(self.selection.get("drone", "")),
                     "enabled": sorted(self.enabled_cameras),
                     "active": self.selection.get("active_lens", "")}
+        if op == "bags":
+            return {"ok": True, "bags": bagreg.listing(),
+                    "scopes": bagreg.SCOPES}
+        if op == "bag_detail":
+            bag = bagreg.detail(req.get("bag", ""))
+            return ({"ok": True, "bag": bag} if bag else
+                    {"ok": False, "error": "no such bag",
+                     "reason": req.get("bag", "")})
+        if op == "check_name":
+            return {"ok": True, "problem": bagreg.valid_name(req.get("name", ""))}
         if op == "projects":
             return {"ok": True, "projects": projects.listing()}
         if op == "build":

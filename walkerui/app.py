@@ -86,6 +86,10 @@ class App:
         self.picker: dict | None = None
         # A modal question drawn over everything: {"text", "options", "on"}.
         self.confirm: dict | None = None
+        # A modal text field: {"text", "hint", "value", "on", "check"}.
+        self.prompt: dict | None = None
+        # A bag's full detail, shown before replaying it.
+        self.bag: dict | None = None
         # Units whose terminal window walker has already opened, so a unit that
         # flaps between states does not spawn a window every time.
         self.opened: set[str] = set()
@@ -234,6 +238,66 @@ class App:
                      curses.color_pair(C_HEAD))
         self.scr.refresh()
 
+    # ── a modal text field ───────────────────────────────────────────────────
+
+    def ask_text(self, text: str, hint: str, on, check=None,
+                 value: str = "") -> None:
+        """
+        Ask for a line of text. `on(value)` acts; `check(value)` returns "" or
+        a complaint, shown live as you type.
+
+        Used for naming a recording. A name is asked for BEFORE the recorder
+        starts, not afterwards, so a flight is never captured into something
+        called `run_2026-09-29_20-45-13` that nobody can identify a week later.
+        """
+        self.prompt = {"text": text, "hint": hint, "value": value,
+                       "on": on, "check": check, "problem": ""}
+
+    def draw_prompt(self) -> None:
+        h, w = self.scr.getmaxyx()
+        pr = self.prompt
+        box_w = min(w - 6, 74)
+        left = max(0, (w - box_w) // 2)
+        top = max(0, h // 2 - 4)
+        for i in range(8):
+            self.put(top + i, left, " " * box_w, curses.color_pair(C_HEAD))
+        self.put(top + 1, left + 3, pr["text"],
+                 curses.color_pair(C_HEAD) | curses.A_BOLD)
+        self.put(top + 2, left + 3, pr["hint"], curses.color_pair(C_HEAD))
+        field = (pr["value"] + "_")[:box_w - 8]
+        self.put(top + 4, left + 3, "> " + field.ljust(box_w - 8),
+                 curses.color_pair(C_HEAD) | curses.A_BOLD)
+        if pr["problem"]:
+            self.put(top + 5, left + 3, pr["problem"][:box_w - 6],
+                     curses.color_pair(C_FAIL) | curses.A_BOLD)
+        self.put(top + 6, left + 3, "[enter] confirm   [esc] cancel",
+                 curses.color_pair(C_HEAD))
+        self.scr.refresh()
+
+    def prompt_key(self, k: str, ch: int) -> None:
+        pr = self.prompt
+        if ch == 27:
+            self.prompt = None
+            return
+        if ch in (curses.KEY_ENTER, 10, 13):
+            if pr["problem"]:
+                return                      # refuse to submit a bad value
+            value = pr["value"].strip()
+            if pr["check"]:
+                problem = pr["check"](value)
+                if problem:
+                    pr["problem"] = problem
+                    return
+            self.prompt = None
+            pr["on"](value)
+            return
+        if ch in (curses.KEY_BACKSPACE, 127, 8):
+            pr["value"] = pr["value"][:-1]
+        elif k and k.isprintable():
+            pr["value"] += k
+        # Validate as you type, so a clash is visible before you commit.
+        pr["problem"] = pr["check"](pr["value"].strip()) if pr["check"] else ""
+
     # ── the picker ───────────────────────────────────────────────────────────
 
     def _locked(self, setting: str) -> bool:
@@ -276,6 +340,25 @@ class App:
                     detail=r.get("wants", "") or r.get("detail", ""),
                     error="" if state in ("built", "stale", "unbuilt") else r.get("detail", "")))
             current = self.selection.get("project", "")
+        elif kind == "bag":
+            try:
+                rows = self.c.call("bags").get("bags", [])
+            except WalkerdError as e:
+                self.say(str(e).splitlines()[0]); return
+            if not rows:
+                self.say("no recordings in bags/ yet — press r to make one", 8)
+                return
+            items = []
+            for b in rows:
+                mins, secs = divmod(int(b["duration_s"]), 60)
+                items.append(scan.Entry(
+                    name=b["name"], path=paths.REPO, kind="bag",
+                    title=f"{mins}:{secs:02d} · {b['messages']:,} msgs",
+                    detail=(f"{b['n_topics']} topics · {b['n_services']} services · "
+                            f"{b['size_bytes']/1e6:.0f} MB · "
+                            + ("can fly back" if b["can_fly"] else "telemetry only")),
+                    error=b.get("error", "")))
+            current = ""
         elif kind == "cameras":
             # EVERY LENS, INDIVIDUALLY. The four profiles remain as one-key
             # shortcuts because that is how people talk about the cameras, but
@@ -330,6 +413,29 @@ class App:
             self.open_picker(pk["kind"])
             self.say("rescanned")
 
+    def start_recording(self) -> None:
+        """Ask for a name, then record. The name comes first, always."""
+        def check(value: str) -> str:
+            if not value:
+                return ""
+            try:
+                return self.c.call("check_name", name=value).get("problem", "")
+            except WalkerdError:
+                return ""
+
+        def begin(name: str) -> None:
+            def go():
+                r = self.c.start("record", name=name, scope="wrapper")
+                if r.get("ok"):
+                    self.say(f"recording into bags/{name}  —  r again to stop", 10)
+                else:
+                    self.say(f"record refused: {r.get('reason','?')}", 12)
+            self.bg("record", go)
+
+        self.ask_text("Name this recording",
+                      "it lands in bags/<name>/ — letters, digits, dot, dash, underscore",
+                      begin, check)
+
     def toggle_camera(self, topic: str) -> None:
         """Flip one lens. Takes effect immediately on a running simulation."""
         def go():
@@ -377,6 +483,11 @@ class App:
             # simulation is composed. That difference is the whole point of
             # subscription-driven rendering, and hiding it would make the two
             # cases look alike when they behave nothing alike.
+            if field == "bag":
+                # Look before you replay: the detail screen, not straight to
+                # playing something you have not seen.
+                self.open_bag(entry.name)
+                return
             if field == "cameras":
                 self.toggle_camera(entry.name)
                 return
@@ -429,7 +540,8 @@ class App:
         heading = {"world": "Worlds — worlds/", "drone": "Drones — models/",
                    "cameras": ("Cameras — each lens switches on its own; "
                                "RViz can then look through it"),
-                   "project": "Projects — projects/   (enter builds if needed, then flies)"}[kind]
+                   "project": "Projects — projects/   (enter builds if needed, then flies)",
+                   "bag": "Recordings — bags/   (enter shows what is inside)"}[kind]
         self.put(0, 0, f" {heading} ".ljust(w),
                  curses.color_pair(C_HEAD) | curses.A_BOLD)
 
@@ -477,10 +589,117 @@ class App:
                    "   • = current ")
         self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
 
+    # ── a bag, in detail ─────────────────────────────────────────────────────
+
+    def open_bag(self, name: str) -> None:
+        """
+        Show everything about a recording before replaying it.
+
+        Replaying a bag you have not looked at is how you discover, two minutes
+        in, that it holds no command topics and the aircraft was never going to
+        move. Everything needed to know that is in the metadata; this screen
+        shows it.
+        """
+        def go():
+            r = self.c.call("bag_detail", bag=name)
+            if r.get("ok"):
+                with self._lock:
+                    self.bag = r["bag"]
+            else:
+                self.say(f"{name}: {r.get('reason','not found')}", 8)
+        self.bg("bag", go)
+
+    def draw_bag(self) -> None:
+        b = self.bag
+        h, w = self.scr.getmaxyx()
+        self.put(0, 0, f" Bag — {b['name']} ".ljust(w),
+                 curses.color_pair(C_HEAD) | curses.A_BOLD)
+
+        mins, secs = divmod(int(b["duration_s"]), 60)
+        kind = "can fly the aircraft back" if b["can_fly"] else "telemetry only — nothing will move"
+        stats = [
+            ("duration", f"{mins}:{secs:02d}"),
+            ("messages", f"{b['messages']:,}"),
+            ("size", f"{b['size_bytes']/1e6:.1f} MB"),
+            ("storage", b["storage"]),
+            ("topics", str(b["n_topics"])),
+            ("service calls", str(b["n_services"])),
+            ("camera streams", str(b["n_cameras"])),
+            ("command topics", f"{b['n_commands']}  ({kind})"),
+        ]
+        row = 2
+        for label, value in stats:
+            self.put(row, 3, label, curses.color_pair(C_DIM))
+            colour = 0
+            if label == "command topics":
+                colour = curses.color_pair(C_OK if b["can_fly"] else C_WARN)
+            self.put(row, 20, value, colour | curses.A_BOLD)
+            row += 1
+
+        if b.get("error"):
+            self.put(row + 1, 3, b["error"][:w - 6], curses.color_pair(C_FAIL))
+            row += 2
+
+        row += 1
+        self.put(row, 3, "topics, by message count", curses.color_pair(C_DIM))
+        row += 1
+        self.put(row, 3, "topic", curses.color_pair(C_DIM))
+        self.put(row, 52, "msgs", curses.color_pair(C_DIM))
+        self.put(row, 62, "Hz", curses.color_pair(C_DIM))
+        self.put(row, 70, "type", curses.color_pair(C_DIM))
+        row += 1
+
+        # Services are counted above but not listed one by one: 59 rows of
+        # _service_event would bury the topics, and the count is the useful
+        # part (it says whether the takeoff that started the flight is in here).
+        shown = [t for t in b["topics"] if not t["name"].endswith("/_service_event")]
+        room = h - row - 3
+        for t_ in shown[:room]:
+            name = t_["name"].replace("/wrapper/psdk_ros2/", "")
+            self.put(row, 3, name[:47])
+            self.put(row, 52, f"{t_['count']:,}"[:9])
+            self.put(row, 62, f"{t_['hz']:.1f}")
+            self.put(row, 70, t_["type"].split("/")[-1][:max(0, w - 72)],
+                     curses.color_pair(C_DIM))
+            row += 1
+        if len(shown) > room > 0:
+            self.put(row, 3, f"... and {len(shown) - room} more",
+                     curses.color_pair(C_DIM))
+
+        if self.status and time.time() < self.status_until:
+            self.put(h - 2, 2, self.status, curses.color_pair(C_WARN))
+        self.put(h - 1, 0, " [enter] replay this bag   [esc] back ".ljust(w),
+                 curses.color_pair(C_HEAD))
+        self.scr.refresh()
+
+    def bag_key(self, k: str, ch: int) -> None:
+        if ch == 27 or k == "q":
+            self.bag = None
+            return
+        if ch in (curses.KEY_ENTER, 10, 13):
+            name = self.bag["name"]
+            self.bag = None
+
+            def go():
+                r = self.c.start("replay", bag=name)
+                if r.get("ok"):
+                    self.say(f"replaying {name} — watch its terminal", 8)
+                else:
+                    self.say(f"replay refused: {r.get('reason','?')}  "
+                             f"[{r.get('hint','')}]", 12)
+            self.bg("replay", go)
+
     # ── drawing ──────────────────────────────────────────────────────────────
 
     def draw(self) -> None:
         self.scr.erase()
+        if self.prompt is not None:
+            self._draw_dashboard()
+            self.draw_prompt()
+            return
+        if self.bag is not None:
+            self.draw_bag()
+            return
         if self.confirm is not None:
             # Drawn over the dashboard rather than instead of it, so the state
             # you are deciding about stays visible behind the question.
@@ -587,7 +806,8 @@ class App:
         # Status line, then the key bar.
         if self.status and time.time() < self.status_until:
             self.put(h - 2, 2, self.status, curses.color_pair(C_WARN))
-        bar = " [s]im [w]orld [d]rone [c]ameras [g]window [t]erminal [P]robe [?]help [Q]uit "
+        bar = (" [s]im [b]ridge [p]roject [r]ec [R]eplay [c]ams [v]iz [q]gc "
+               "[t]erm [?]help [Q]uit ")
         self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
         s.refresh()
 
@@ -634,6 +854,12 @@ class App:
                 ch, k = -2, ""          # -2 is walker's "Shift+Enter"
             elif mod_key is not None:
                 return                  # some other modified key: ignore
+        if self.prompt is not None:
+            self.prompt_key(k, ch)
+            return
+        if self.bag is not None:
+            self.bag_key(k, ch)
+            return
         if self.confirm is not None:
             cf = self.confirm
             if k in [o[0] for o in cf["options"]]:
@@ -670,6 +896,20 @@ class App:
                 self.toggle_unit("project")          # stop the running mission
             else:
                 self.open_picker("project")          # choose which one to fly
+        elif k == "r":
+            state = self.units.get("record", {}).get("state", "stopped")
+            if state in ("running", "starting"):
+                self.bg("record", lambda: (self.c.stop("record"),
+                                           self.say("closing the recording…", 8)))
+            else:
+                self.start_recording()
+        elif k == "R":
+            state = self.units.get("replay", {}).get("state", "stopped")
+            if state in ("running", "starting"):
+                self.bg("replay", lambda: (self.c.stop("replay"),
+                                           self.say("stopping the replay", 6)))
+            else:
+                self.open_picker("bag")
         elif k in UNIT_KEYS.values():
             name = next((n for n, kk in UNIT_KEYS.items() if kk == k), None)
             if name in self.units:

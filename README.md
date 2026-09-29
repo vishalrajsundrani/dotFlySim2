@@ -34,6 +34,7 @@ simulation today and a real Matrice 4E tomorrow, unchanged.
 4. [What may run alongside what](#4-what-may-run-alongside-what)
 5. [When a setting may be changed](#5-when-a-setting-may-be-changed)
 6. [Cameras](#6-cameras)
+6b. [Recording and replaying a flight](#6b-recording-and-replaying-a-flight)
 7. [Adding a world, a drone, a mission](#7-adding-a-world-a-drone-a-mission)
 8. [Troubleshooting](#8-troubleshooting)
 9. [What is not here yet](#9-what-is-not-here-yet)
@@ -159,6 +160,8 @@ back to a clone rather than failing ten minutes into the compile.
 | `p` | choose a mission (or stop the running one) |
 | `q` | QGroundControl |
 | `v` | RViz |
+| `r` | record a flight — asks for a name first |
+| `R` | replay a recording — shows what is inside it first |
 | `c` | cameras — every lens individually |
 | `w` `d` | world, drone |
 | `g` | Gazebo window on/off |
@@ -195,12 +198,17 @@ simulation still runs — you just read its output in walker.
 
 Rows = what you are starting. Columns = what is already running.
 
-| start ↓ / running → | sim | project | qgc | rviz |
-|---|---|---|---|---|
-| **sim** | — | n/a | ✅ | ✅ |
-| **project** | ✅ required | ⛔ one at a time | ✅ QGC auto-locked | ✅ |
-| **qgc** | ✅ required | ✅ starts locked | — | ✅ |
-| **rviz** | ✅ | ✅ | ✅ | — |
+| start ↓ / running → | sim | project | replay | record | qgc |
+|---|---|---|---|---|---|
+| **project** | ✅ required | ⛔ one at a time | ⛔ the bag owns the surface | ✅ | ✅ QGC auto-locked |
+| **replay** | ✅ **required** | ⛔ stop the project | ⛔ one at a time | ✅ | ✅ QGC auto-locked |
+| **record** | ✅ | ✅ **always allowed** | ✅ **always allowed** | ⛔ one at a time | ✅ |
+| **qgc** | ✅ required | ✅ starts locked | ✅ starts locked | ✅ | — |
+| **rviz** | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+**Recording is never locked out.** You can start one during a mission, during a
+replay, or with nothing running, and stop it at any moment. One recorder at a
+time is the only limit.
 
 A refusal always names what is holding the lock and the key that clears it:
 
@@ -279,6 +287,74 @@ on and unticking it gives the GPU time back.
 
 ---
 
+## 6b. Recording and replaying a flight
+
+### Recording
+
+Press `r`. **It asks for a name before it starts** — a flight is never captured
+into something called `run_2026-09-29_20-45-13` that nobody can identify a week
+later. The name is checked as you type: illegal characters and a clash with an
+existing bag are both refused before you commit.
+
+The recording lands in `bags/<name>/` and captures the wrapper surface:
+commands, telemetry **and service calls**. Press `r` again to stop, and walker
+reports what it got:
+
+```
+bags/orbit_demo: 2:11, 68,032 msgs, 36 topics, 59 services, 10.2 MB — can fly back
+```
+
+> **Service calls are half of what made a flight happen.** `takeoff`, `land`
+> and `obtain_ctrl_authority` are not topics, and a bag without them can re-fly
+> a sortie's setpoints but never the takeoff that started it. rosbag2 records a
+> service through a hidden `<service>/_service_event` topic that `--regex` does
+> not reach, so walker passes the names explicitly — asked of the live graph,
+> so a service added to the bridge is recorded without anyone updating a list.
+
+> **A recording is closed with SIGINT, never killed.** rosbag2 writes
+> `metadata.yaml` and closes the mcap on Ctrl-C; a killed recorder leaves a
+> directory `ros2 bag info` cannot read and `ros2 bag play` will not open —
+> the whole flight lost at the last step. Walker gives it 30 seconds.
+
+### Replaying
+
+Press `R` for the recordings, and **Enter to look inside one before playing
+it**:
+
+```
+ Bag — orbit_demo
+   duration         2:11
+   messages         68,032
+   size             10.2 MB
+   topics           36
+   service calls    59
+   camera streams   0
+   command topics   1  (can fly the aircraft back)
+
+   topic                              msgs      Hz      type
+   altitude_barometric                4,095     31.2    Float32
+   position_fused                     3,914     29.9    PositionFused
+   attitude                           3,823     29.2    QuaternionStamped
+   ...
+ [enter] replay this bag   [esc] back
+```
+
+`command topics` is the line that matters. A bag holding one of the five
+setpoint topics can **fly the aircraft back**; one holding none replays as
+telemetry and nothing moves. Finding that out two minutes into a replay is the
+reason this screen exists.
+
+**A replay needs the simulation and the bridge.** There is no
+simulation-less replay: the bag drives the aircraft, and the graph the aircraft
+lives in has to exist.
+
+While a bag plays, the bridge's own telemetry routes are switched **off** so
+the recording owns the wrapper surface — otherwise a subscriber would get the
+bridge's telemetry and the bag's interleaved, with nothing saying which is
+which. The routes are restored when the replay stops.
+
+---
+
 ## 7. Adding a world, a drone, a mission
 
 ### A world
@@ -348,8 +424,6 @@ different paths through the daemon cache. **Trust walker's link panel and
 
 Stated plainly so nobody hunts for them:
 
-- **rosbag recording and replay.** The `record` and `replay` keys appear in the
-  keymap but the units are not implemented. Planned as milestone M7.
 - **`demo_gnss_stereo_inertial`**, the factor-graph SLAM project that consumes
   the fisheye pair. Planned as milestone M9.
 

@@ -1248,7 +1248,7 @@ acceptance test passes.
 | **M4** 🔶 | **Bridge always-on + full PSDK surface** | **Substantially done 2026-09-22.** ✅ Bridge is a walkerd unit, up with the simulation. ✅ **56/56 services (100%)** with service introspection on (59 `_service_event` topics). ✅ 90/102 of the surface live, **0 unexpectedly absent**. ✅ 11/19 measurable rates within ±20% of the PDF (was 3). ⬜ Remaining: 8 source-limited rates need periodic republish; 7 telemetry topics need converters V1 never had. See Appendix F. |
 | **M5** ✅ | **C++ projects + terminals + constraints** | **DONE 2026-09-22.** `demo_orbit_mission` flies authority → takeoff → climb → a clean orbit → land → release, **exits 0 by itself**, and frees the flight lock. A second project is refused by name with the way out. `walker-attach` gives a live PX4 console in its own ptyxis window. Step transitions appear in walker's log pane. See Appendix G. |
 | **M6** ✅ | **Cameras + RViz + QGC + the guard** | **DONE 2026-09-23.** Live camera toggling measured (41.9% → 101.2% → 41.9%). Intrinsics corrected against DJI's specs. RViz runs with the new `walker_rviz_panel` (D6) registered and loading cleanly. QGC connects through the guard (`to_px4` 0 → 114 in 12 s) and keeps receiving 2506 telemetry datagrams while locked; the command filter itself is proven separately. Appendices H and I. |
-| **M7** | **rosbag record + replay** | record during a project; record during a replay; named bag lands in `bags/`; `ros2 bag info` is clean; fly-back replay re-flies the recorded orbit; passive replay drives RViz with no simulation running |
+| **M7** ✅ | **rosbag record + replay** | **DONE 2026-09-29.** Recording asks for a name first and captures topics **and service calls** (59 `_service_event` topics in a real bag). Selecting a recording opens a detail screen — duration, message count, size, per-topic counts and frequencies, and whether it can fly the aircraft back — before replay starts. Replay requires sim+bridge (D3), switches the bridge's routes off so the bag owns the surface, and is refused alongside a project. Recording during a replay is allowed. Appendix N. |
 | **M8** 🔶 | **Documentation** | **Written 2026-09-29** — README.md, CPP_DESIGN.md, ROS2_ARCHITECTURE.md (1 254 lines). Every command in them executed; the surface figures they quote re-measured against the live graph and one error found and fixed (6 simulation-only topics, not 4). ⬜ Rosbag (M7) and the SLAM project (M9) are deliberately excluded and marked as not-yet-present; both docs need a pass once those land. |
 | **M9** | **`demo_gnss_stereo_inertial` port — committed (D5)**, plus `simty.mock` as a test fixture and a CI smoke test | the SLAM project builds and runs on the `fisheye` profile, consuming `perception_stereo_{left,right}_stream` + `camera_info`, and its trajectory error against ground truth is reported; headless orbit flight in CI producing a bag |
 
@@ -2193,6 +2193,81 @@ empty image panel, a conformance check reporting 0/102, and a camera manager
 rendering nothing. `ROS2_ARCHITECTURE.md §8` states the two rules that prevent
 all four — subscribe Best Effort when in doubt, and match durability when a
 late-starting node must adopt existing state.
+
+---
+
+## Appendix N — M7: recording and replaying a flight
+
+### Recording
+
+`r` **asks for a name before it starts.** A flight captured as
+`run_2026-09-29_20-45-13` is one nobody can identify a week later, so the name
+is a precondition rather than something applied afterwards. It is validated as
+you type — illegal characters and a clash with an existing bag are both refused
+before you commit.
+
+Verified on a real flight:
+
+```
+bags/orbit_demo: 2:11, 68,032 msgs, 36 topics, 59 services, 10.2 MB — can fly back
+```
+
+Two properties inherited from V1 because they were hard-won:
+
+* **Service calls are recorded.** `takeoff`, `land` and `obtain_ctrl_authority`
+  are not topics; a bag without them can re-fly a sortie's setpoints but never
+  the takeoff that started it. rosbag2 records a service through a hidden
+  `<service>/_service_event` topic that `--regex` cannot reach, so the names are
+  passed explicitly — **asked of the live graph**, so a service added to the
+  bridge is recorded without anyone remembering to update a list.
+* **SIGINT, never SIGKILL.** rosbag2 writes `metadata.yaml` and closes the mcap
+  on Ctrl-C. A killed recorder leaves a directory `ros2 bag info` cannot read
+  and `ros2 bag play` will not open — the whole flight lost at the last step.
+
+### The detail screen
+
+Selecting a recording shows what is inside it **before** anything plays:
+
+```
+ Bag — orbit_demo
+   duration         2:11          topics           36
+   messages         68,032        service calls    59
+   size             10.2 MB       camera streams   0
+   storage          mcap          command topics   1  (can fly the aircraft back)
+
+   topic                        msgs      Hz      type
+   altitude_barometric          4,095     31.2    Float32
+   position_fused               3,914     29.9    PositionFused
+   attitude                     3,823     29.2    QuaternionStamped
+```
+
+`command topics` is the line that matters: a bag holding one of the five
+setpoint topics can fly the aircraft back, one holding none replays as
+telemetry and nothing moves. Discovering that two minutes into a replay is
+exactly what this screen prevents.
+
+All of it comes from `metadata.yaml`, read directly. `ros2 bag info` costs 4–5
+seconds per bag, which makes a screen listing a dozen recordings unusable.
+
+### Replay
+
+Measured against the rules:
+
+| | result |
+|---|---|
+| replay with no simulation | **refused** — "replay needs sim and bridge" (decision D3) |
+| replay with sim + bridge | runs; bag drives the surface (`flight_status` 1.9 Hz, `height` 24.5 Hz) |
+| project while replaying | **refused** — "a replay owns the wrapper surface; a project would be a second writer" |
+| record while replaying | **allowed** |
+| a second recorder | **refused** — "one recorder at a time" |
+| a duplicate bag name | **refused** — "bags/orbit_demo already exists" |
+
+While a bag plays the bridge's own telemetry routes are switched **off**, so
+the recording owns the wrapper surface. Without that a subscriber would receive
+the bridge's telemetry and the bag's interleaved, with nothing saying which is
+which — the two-writers failure that is invisible from the inside. The routes
+are restored when the replay stops; left in replay mode the bridge publishes
+nothing and the next mission would wait forever for telemetry.
 
 ---
 

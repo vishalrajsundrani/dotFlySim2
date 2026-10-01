@@ -93,6 +93,35 @@
         </magnetometer>
       </sensor>
 
+      <!-- IMU NOISE IS MEASURED, NOT INHERITED.
+           Every number in the noise blocks below was derived from a real
+           Matrice 4E: rosbag bag_000026, 184 s, from the 6.3 s the aircraft
+           sat on the ground before takeoff. tools/imu_from_bag.py does the
+           measuring and rewrites this block; do not hand-edit it, re-run the
+           tool. The full derivation is in IMU_CALIBRATION.md.
+
+           Three things about these values are not obvious.
+
+           stddev is quoted AT 250 Hz, this sensor's update_rate, but the
+           aircraft publishes at 50 Hz. A standard deviation means nothing
+           without the rate it was sampled at, so the measurement was turned
+           into a noise density and back up: stddev = density * sqrt(250).
+           Change update_rate and these become wrong; re-run the tool.
+
+           The density came from the flat top of the spectrum, not from the
+           variance of the stationary segment. A parked aircraft sways on its
+           legs, and on the x accelerometer that sway is 2.4x the white noise.
+           Counting it as sensor noise would have made this model noisier than
+           the part it represents.
+
+           The accelerometer means are zero on purpose. DJI subtracts gravity
+           from acceleration_body_raw before publishing it, so its mean mixes
+           sensor bias with gravity removal error and is not a bias we can
+           copy. The gyro means ARE real measured biases.
+
+           dynamic_bias_stddev and dynamic_bias_correlation_time are still the
+           inherited x500 figures: 6.3 s of stillness cannot support a 300 s
+           correlation time, and a fitted number there would be invention. -->
       <sensor name="imu_sensor" type="imu">
         <gz_frame_id>base_link</gz_frame_id>
         <always_on>1</always_on>
@@ -101,25 +130,25 @@
           <angular_velocity>
             <x>
               <noise type="gaussian">
-                <mean>0.0</mean>
-                <stddev>0.00112512</stddev>
-                <dynamic_bias_stddev>3.22e-5</dynamic_bias_stddev>
+                <mean>-0.00056509389</mean>
+                <stddev>0.00066325603</stddev>
+                <dynamic_bias_stddev>3.22e-05</dynamic_bias_stddev>
                 <dynamic_bias_correlation_time>300</dynamic_bias_correlation_time>
               </noise>
             </x>
             <y>
               <noise type="gaussian">
-                <mean>0.0</mean>
-                <stddev>0.00112512</stddev>
-                <dynamic_bias_stddev>7.65e-5</dynamic_bias_stddev>
+                <mean>0.00088365378</mean>
+                <stddev>0.00060542074</stddev>
+                <dynamic_bias_stddev>7.65e-05</dynamic_bias_stddev>
                 <dynamic_bias_correlation_time>300</dynamic_bias_correlation_time>
               </noise>
             </y>
             <z>
               <noise type="gaussian">
-                <mean>0.0</mean>
-                <stddev>0.00112512</stddev>
-                <dynamic_bias_stddev>5.37e-5</dynamic_bias_stddev>
+                <mean>-0.00042490432</mean>
+                <stddev>0.00060836685</stddev>
+                <dynamic_bias_stddev>5.37e-05</dynamic_bias_stddev>
                 <dynamic_bias_correlation_time>300</dynamic_bias_correlation_time>
               </noise>
             </z>
@@ -127,29 +156,31 @@
           <linear_acceleration>
             <x>
               <noise type="gaussian">
-                <mean>0.0</mean>
-                <stddev>0.01583058</stddev>
-                <dynamic_bias_stddev>1.47e-3</dynamic_bias_stddev>
+                <mean>0</mean>
+                <stddev>0.0022675357</stddev>
+                <dynamic_bias_stddev>0.00147</dynamic_bias_stddev>
                 <dynamic_bias_correlation_time>100</dynamic_bias_correlation_time>
               </noise>
             </x>
             <y>
               <noise type="gaussian">
-                <mean>0.0</mean>
-                <stddev>0.01375704</stddev>
-                <dynamic_bias_stddev>9.75e-4</dynamic_bias_stddev>
+                <mean>0</mean>
+                <stddev>0.0025002416</stddev>
+                <dynamic_bias_stddev>0.000975</dynamic_bias_stddev>
                 <dynamic_bias_correlation_time>100</dynamic_bias_correlation_time>
               </noise>
             </y>
             <z>
               <noise type="gaussian">
-                <mean>0.0</mean>
-                <stddev>0.01864448</stddev>
-                <dynamic_bias_stddev>1.07e-3</dynamic_bias_stddev>
+                <mean>0</mean>
+                <stddev>0.011341797</stddev>
+                <dynamic_bias_stddev>0.00107</dynamic_bias_stddev>
                 <dynamic_bias_correlation_time>100</dynamic_bias_correlation_time>
               </noise>
             </z>
           </linear_acceleration>
+
+
         </imu>
       </sensor>
 

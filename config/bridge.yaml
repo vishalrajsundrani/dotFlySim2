@@ -1,3 +1,16 @@
+# REFERENCE COPY. NOT READ AT RUN TIME.
+#
+# tools/compose_sim.py writes the bridge config this simulation actually uses,
+# from the sensors the composed model turns out to have, into
+# ~/gz_runtime/bridge.yaml. start_sim.sh points ros_gz_bridge at that file.
+# Nothing loads this one.
+#
+# It is kept because it is the readable example of the lazy:true pattern that
+# the model SDF and VERSION2_PLAN.md both point at. Editing it changes
+# nothing: if a sensor is missing from the running bridge, the fix is in
+# compose_sim.py's _TYPES table, which is where six fisheyes were silently
+# dropped for being type "wideanglecamera" rather than "camera".
+
 # Simulation clock
 - ros_topic_name: "/clock"
   gz_topic_name: "/clock"
@@ -102,45 +115,108 @@
   gz_type_name: "gz.msgs.StringMsg"
   direction: ROS_TO_GZ
 
-# Forward perception stereo pair (models/m4e/model.sdf), mono8 704x704 @ 20 Hz.
+# The six perception fisheyes (models/m4e/model.sdf), mono8 704x704 @ 20 Hz.
 #
-# These stand in for the M4E's obstacle-avoidance cameras. simty routes them on
-# to /wrapper/psdk_ros2/perception_stereo_{left,right}_stream when the
-# start_perception service is called, exactly as the real wrapper does.
+# Four at the corners, two underneath, SHARED between five sensing directions:
+#   FRONT = fl+fr   REAR = rr+rl   LEFT = rl+fl   RIGHT = fr+rr   DOWN = dl+dr
+# which sensor is the left EYE of a direction is not its name; see
+# config/perception_calib.yaml, generated from the model.
+#
+# simty routes the chosen pair on to
+# /wrapper/psdk_ros2/perception_stereo_{left,right}_stream when start_perception
+# is called, exactly as the real wrapper does: one direction at a time.
 #
 # lazy=true, like the payload lenses: with nobody subscribed Gazebo renders
-# neither camera, so the pair costs nothing until a perception node asks for it.
-# Uncompressed these are ~495 kB a frame, ~20 MB/s for the pair, which is fine
-# over shared memory inside the container and is NOT fine over the link to a
-# Manifold -- see the datagram note in config/dds.xml.
-- ros_topic_name: "/drone/perception/front/left/image_raw"
-  gz_topic_name: "/drone/perception/front/left/image_raw"
+# nothing, so six fisheyes cost nothing until a perception node asks. That
+# matters more here than it did with two: uncompressed these are ~495 kB a
+# frame, so all six rendering is ~60 MB/s. Fine over shared memory inside the
+# container, NOT fine over a link -- see the datagram note in config/dds.xml.
+
+- ros_topic_name: "/drone/perception/fl/image_raw"
+  gz_topic_name: "/drone/perception/fl/image_raw"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "gz.msgs.Image"
   direction: GZ_TO_ROS
   lazy: true
 
-- ros_topic_name: "/drone/perception/front/right/image_raw"
-  gz_topic_name: "/drone/perception/front/right/image_raw"
+- ros_topic_name: "/drone/perception/fr/image_raw"
+  gz_topic_name: "/drone/perception/fr/image_raw"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "gz.msgs.Image"
   direction: GZ_TO_ROS
   lazy: true
 
-# The first camera_info bridged in this repo. gz-sim derives the info topic by
-# appending /camera_info to the sensor's <topic>, which puts it under a name
-# ending in image_raw; the ROS side is renamed to the conventional sibling so
-# that image_raw and camera_info sit next to each other and message_filters can
-# pair them. The names differ on purpose -- this is not a typo.
-- ros_topic_name: "/drone/perception/front/left/camera_info"
-  gz_topic_name: "/drone/perception/front/left/image_raw/camera_info"
+- ros_topic_name: "/drone/perception/rl/image_raw"
+  gz_topic_name: "/drone/perception/rl/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/rr/image_raw"
+  gz_topic_name: "/drone/perception/rr/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/dl/image_raw"
+  gz_topic_name: "/drone/perception/dl/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/dr/image_raw"
+  gz_topic_name: "/drone/perception/dr/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+# gz-sim derives the info topic by appending /camera_info to the sensor's
+# <topic>, which puts it under a name ending in image_raw; the ROS side is
+# renamed to the conventional sibling so that image_raw and camera_info sit
+# next to each other and message_filters can pair them. The names differ on
+# purpose -- this is not a typo.
+
+- ros_topic_name: "/drone/perception/fl/camera_info"
+  gz_topic_name: "/drone/perception/fl/image_raw/camera_info"
   ros_type_name: "sensor_msgs/msg/CameraInfo"
   gz_type_name: "gz.msgs.CameraInfo"
   direction: GZ_TO_ROS
   lazy: true
 
-- ros_topic_name: "/drone/perception/front/right/camera_info"
-  gz_topic_name: "/drone/perception/front/right/image_raw/camera_info"
+- ros_topic_name: "/drone/perception/fr/camera_info"
+  gz_topic_name: "/drone/perception/fr/image_raw/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/rl/camera_info"
+  gz_topic_name: "/drone/perception/rl/image_raw/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/rr/camera_info"
+  gz_topic_name: "/drone/perception/rr/image_raw/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/dl/camera_info"
+  gz_topic_name: "/drone/perception/dl/image_raw/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/drone/perception/dr/camera_info"
+  gz_topic_name: "/drone/perception/dr/image_raw/camera_info"
   ros_type_name: "sensor_msgs/msg/CameraInfo"
   gz_type_name: "gz.msgs.CameraInfo"
   direction: GZ_TO_ROS

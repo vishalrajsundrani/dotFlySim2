@@ -51,14 +51,23 @@ STATE_MARK = {
     "running": "●", "starting": "◐", "stopping": "◑", "failed": "✖", "stopped": "○",
 }
 
-# The four camera profiles, with what each costs. The megapixel figures are
-# measured for the m4e's 12 payload + 2 fisheye sensors (SPIKE-1); walker
-# recomputes them per drone from its manifest once more drones exist.
+# The four profile shortcuts. The megapixel figures describe WHAT THE PROFILE
+# TURNS ON, which is not the same as what the aircraft carries: `payload` means
+# the wide lens at FHD, the one the wrapper surface actually streams, not all
+# twelve payload sensors at once.
+#
+# These numbers used to say ~1074 MP/s for `payload`, which is the cost of all
+# twelve. The profile has only ever enabled one of them. Overstating a profile
+# by 17x steers people away from the one they want, so the figures below are
+# computed from models/*/model.sdf by tools/sdf_cameras.py rather than
+# remembered. Re-derive with:
+#   python3 -c "import sys;sys.path.insert(0,'tools');import sdf_cameras as S;
+#               print(S.read('models/m4e_camera/model.sdf')['m4e_wide_videofhd'])"
 _CAMERA_TITLES = {
-    "none":    ("no cameras",      "0 MP/s — fastest; flight work, CI"),
-    "fisheye": ("fisheye only",    "~20 MP/s — obstacle avoidance, stereo, SLAM"),
-    "payload": ("payload only",    "~1074 MP/s — gimbal/inspection, QGC video"),
-    "all":     ("fisheye + payload", "~1094 MP/s — needs a real GPU"),
+    "none":    ("no cameras",        "0 MP/s — fastest; flight work, CI"),
+    "fisheye": ("forward pair",      "~20 MP/s — obstacle avoidance, stereo, SLAM"),
+    "payload": ("payload, wide FHD", "~62 MP/s — gimbal/inspection, QGC video"),
+    "all":     ("pair + payload",    "~82 MP/s — the usual working set"),
 }
 
 # unit -> the key that starts/stops it. Mirrors §7 so the help screen and the
@@ -79,6 +88,9 @@ class App:
         self.links: list[dict] = []
         self.editable: dict = {}
         self.cam_enabled: set[str] = set()
+        # Which stereo direction is STREAMING, as opposed to which lenses
+        # are rendering. start_perception owns the first, walker the second.
+        self.cam_live: str = ""
         self.busy: set[str] = set()
         # The picker overlays the dashboard rather than replacing the app's
         # state, so events keep arriving and the simulation keeps running
@@ -365,19 +377,19 @@ class App:
                     error=b.get("error", "")))
             current = ""
         elif kind == "cameras":
-            # EVERY LENS, INDIVIDUALLY. The four profiles remain as one-key
-            # shortcuts because that is how people talk about the cameras, but
-            # they cannot express "tele at preview plus the downward fisheye",
-            # which is a perfectly reasonable thing to want.
+            # PERCEPTION BY DIRECTION, PAYLOAD BY LENS. A direction is what
+            # start_perception takes and what an operator actually chooses;
+            # the six fisheyes behind it are shared, so listing them
+            # individually would hide both which pair serves which direction
+            # and the fact that the second direction is usually half price.
+            # The four profiles remain as one-key shortcuts.
             try:
                 r = self.c.call("camera_list")
             except WalkerdError as e:
                 self.say(str(e).splitlines()[0]); return
             self.cam_enabled = set(r.get("enabled", []))
-            items = [scan.Entry(name=cam["topic"], path=paths.REPO, kind="camera",
-                                title=cam["label"], detail=cam["detail"],
-                                meta={"group": cam["group"]})
-                     for cam in r.get("cameras", [])]
+            self.cam_live = r.get("live_direction", "")
+            items = self._camera_items(r)
             current = ""
         else:
             items = scan.get("worlds" if kind == "world" else "drones", force=True)
@@ -388,15 +400,99 @@ class App:
             self.say(f"nothing to choose: no {kind}s found in {where}", 8)
             return
         idx = next((i for i, e in enumerate(items) if e.name == current), 0)
+        # The camera screen opens on a heading otherwise: its first row is a
+        # section title, and a cursor parked somewhere it cannot act looks
+        # like the screen is not responding.
+        if kind == "cameras" and not self._selectable(items[idx]):
+            idx = next((i for i, e in enumerate(items) if self._selectable(e)), idx)
         self.picker = {"kind": kind, "items": items, "idx": idx}
+
+    def _camera_items(self, r: dict) -> list:
+        """
+        The camera screen, grouped the way the hardware actually works.
+
+        A flat list of eighteen topics was fine when "fisheye" meant two
+        cameras. It is not fine now: the six perception lenses are SHARED
+        between five directions, so the thing an operator chooses is a
+        direction, and the thing it costs depends on what is already on.
+        Showing eighteen checkboxes would hide both facts.
+
+        Headings are rows too, so the list stays one scrollable thing, and are
+        skipped by the cursor.
+        """
+        items = [scan.Entry(
+            name="hdr:perception", path=paths.REPO, kind="camera",
+            title="PERCEPTION", meta={"row": "header"},
+            detail="six fisheyes shared between five directions; "
+                   "one streams at a time")]
+
+        for d in r.get("directions", []):
+            live = d["direction"] == self.cam_live
+            cost = d["marginal_mpix_s"]
+            if not d["available"]:
+                note = "not in this model"
+            elif live:
+                note = "streaming now"
+            elif cost == 0 and d["shares"]:
+                note = "free \u00b7 shares " + ",".join(
+                    s.replace("perception_", "") for s in d["shares"])
+            else:
+                note = f"+{cost:.0f} MP/s"
+            items.append(scan.Entry(
+                name=f"dir:{d['direction']}", path=paths.REPO, kind="camera",
+                title=d["direction"],
+                detail=(f"{d['left'].replace('perception_','')}+"
+                        f"{d['right'].replace('perception_','')}  "
+                        f"{(d['baseline_m'] or 0) * 1000:.0f} mm  {d['range']}"),
+                meta={"row": "direction", "topics": d["topics"],
+                      "note": note, "live": live,
+                      "available": d["available"]}))
+
+        # UP is listed and unselectable on purpose: a reader who knows the
+        # aircraft has five directions should see why only four are offered,
+        # rather than wonder whether walker forgot one.
+        items.append(scan.Entry(
+            name="dir:UP", path=paths.REPO, kind="camera", title="UP",
+            detail="no upward stereo pair on the M4E",
+            meta={"row": "note"}))
+
+        items.append(scan.Entry(
+            name="hdr:payload", path=paths.REPO, kind="camera",
+            title="PAYLOAD", meta={"row": "header"},
+            detail="one lens reaches main_camera_stream; zoom picks which"))
+        for cam in r.get("cameras", []):
+            if cam.get("group") == "vision":
+                continue          # shown above, as directions
+            items.append(scan.Entry(
+                name=cam["topic"], path=paths.REPO, kind="camera",
+                title=cam["label"], detail=cam["detail"],
+                meta={"row": "sensor", "topics": [cam["topic"]],
+                      "note": "", "available": True}))
+        return items
+
+    @staticmethod
+    def _selectable(entry) -> bool:
+        return entry.meta.get("row") in ("direction", "sensor") and \
+            entry.meta.get("available", True)
+
+    def _camera_step(self, delta: int) -> None:
+        """Move the cursor, skipping headings and the unselectable rows."""
+        pk = self.picker
+        items, n = pk["items"], len(pk["items"])
+        for _ in range(n):
+            pk["idx"] = (pk["idx"] + delta) % n
+            if self._selectable(items[pk["idx"]]):
+                return
 
     def picker_key(self, k: str, ch: int) -> None:
         pk = self.picker
         n = len(pk["items"])
         if ch in (curses.KEY_UP,) or k == "k":
-            pk["idx"] = (pk["idx"] - 1) % n
+            self._camera_step(-1) if pk["kind"] == "cameras" else \
+                pk.__setitem__("idx", (pk["idx"] - 1) % n)
         elif ch in (curses.KEY_DOWN,) or k == "j":
-            pk["idx"] = (pk["idx"] + 1) % n
+            self._camera_step(1) if pk["kind"] == "cameras" else \
+                pk.__setitem__("idx", (pk["idx"] + 1) % n)
         elif ch in (curses.KEY_ENTER, 10, 13):
             # Enter ALWAYS rebuilds. For a mission you are iterating on, that
             # is what you want every time: the alternative is running yesterday's
@@ -410,7 +506,7 @@ class App:
         elif k in ("\x1b", "q"):
             self.picker = None
         elif pk["kind"] == "cameras" and k == " ":
-            self.toggle_camera(pk["items"][pk["idx"]].name)
+            self.toggle_camera(pk["items"][pk["idx"]])
         elif pk["kind"] == "cameras" and k in "1234":
             self.apply_camera_profile(["none", "fisheye", "payload", "all"][int(k) - 1])
         elif ch == curses.KEY_F5 or k == "5":
@@ -441,28 +537,59 @@ class App:
                       "it lands in bags/<name>/ — letters, digits, dot, dash, underscore",
                       begin, check)
 
-    def toggle_camera(self, topic: str) -> None:
-        """Flip one lens. Takes effect immediately on a running simulation."""
+    def toggle_camera(self, entry) -> None:
+        """
+        Flip one row. A direction is two lenses, so it is two topics.
+
+        Sent as on/off LISTS rather than two toggles: a direction is one
+        decision, and two round trips would leave a half-enabled pair visible
+        on the screen in between.
+        """
+        topics = entry.meta.get("topics", []) if hasattr(entry, "meta") else []
+        if not topics:
+            return
+        on_now = all(x in self.cam_enabled for x in topics)
+        args = {"off": topics} if on_now else {"on": topics}
+
         def go():
-            r = self.c.call("cameras", args={"toggle": topic})
+            r = self.c.call("cameras", args=args)
             if r.get("ok"):
-                with self._lock:
-                    self.cam_enabled = set(r.get("enabled", []))
-                    self.selection["cameras"] = r.get("profile", "custom")
-                on = topic in self.cam_enabled
-                self.say(f"{'on ' if on else 'off'} {topic}"
-                         f"   ({len(self.cam_enabled)} rendering)", 5)
+                self._refresh_cameras(r.get("profile", "custom"))
+                self.say(f"{entry.title}: {'off' if on_now else 'on'}  "
+                         f"— {len(self.cam_enabled)} lens(es) rendering", 6)
             else:
                 self.say(f"cameras: {r.get('reason','?')}  [{r.get('hint','')}]", 10)
         self.bg("cameras", go)
+
+    def _refresh_cameras(self, profile: str) -> None:
+        """Re-read the camera state and rebuild the screen from it.
+
+        Re-asking rather than patching from the reply is not laziness: the
+        six perception lenses are shared, so switching ONE direction changes
+        the marginal cost of every other one. A screen patched in place would
+        keep showing what the previous arrangement cost.
+
+        Runs on a worker thread, so everything it touches is taken under the
+        app lock -- the draw thread reads these same fields.
+        """
+        try:
+            fresh = self.c.call("camera_list")
+        except WalkerdError:
+            return
+        with self._lock:
+            self.cam_enabled = set(fresh.get("enabled", []))
+            self.cam_live = fresh.get("live_direction", "")
+            self.selection["cameras"] = profile
+            if self.picker and self.picker["kind"] == "cameras":
+                keep = self.picker["idx"]
+                self.picker["items"] = self._camera_items(fresh)
+                self.picker["idx"] = max(0, min(keep, len(self.picker["items"]) - 1))
 
     def apply_camera_profile(self, profile: str) -> None:
         def go():
             r = self.c.call("cameras", args={"profile": profile})
             if r.get("ok"):
-                with self._lock:
-                    self.cam_enabled = set(r.get("enabled", []))
-                    self.selection["cameras"] = profile
+                self._refresh_cameras(profile)
                 self.say(f"{profile}: {len(self.cam_enabled)} camera(s) rendering", 6)
             else:
                 self.say(f"cameras: {r.get('reason','?')}  [{r.get('hint','')}]", 10)
@@ -494,7 +621,7 @@ class App:
                 self.open_bag(entry.name)
                 return
             if field == "cameras":
-                self.toggle_camera(entry.name)
+                self.toggle_camera(entry)
                 return
             if field == "project":
                 r = self.c.start("project", package=entry.name, rebuild=rebuild)
@@ -543,8 +670,8 @@ class App:
         h, w = s.getmaxyx()
         kind = pk["kind"]
         heading = {"world": "Worlds — worlds/", "drone": "Drones — models/",
-                   "cameras": ("Cameras — each lens switches on its own; "
-                               "RViz can then look through it"),
+                   "cameras": ("Cameras — perception by DIRECTION (the six "
+                               "lenses are shared), payload by lens"),
                    "project": "Projects — projects/   (enter builds if needed, then flies)",
                    "bag": "Recordings — bags/   (enter shows what is inside)"}[kind]
         self.put(0, 0, f" {heading} ".ljust(w),
@@ -564,12 +691,32 @@ class App:
             self.put(y, 1, mark, curses.color_pair(C_KEY) | curses.A_BOLD)
             name = e.name[:20].ljust(21)
             if kind == "cameras":
-                on = e.name in self.cam_enabled
-                self.put(y, 3, "[x]" if on else "[ ]",
-                         curses.color_pair(C_OK if on else C_DIM) | curses.A_BOLD)
-                self.put(y, 7, (e.title or "")[:24].ljust(25), attr)
-                self.put(y, 33, e.detail[:20].ljust(21), curses.color_pair(C_DIM))
-                self.put(y, 55, e.name[:max(0, w - 57)], curses.color_pair(C_DIM))
+                row = e.meta.get("row", "sensor")
+                if row == "header":
+                    self.put(y, 2, (e.title or "")[:12].ljust(12),
+                             curses.color_pair(C_KEY) | curses.A_BOLD)
+                    self.put(y, 15, e.detail[:max(0, w - 17)],
+                             curses.color_pair(C_DIM))
+                    continue
+                if row == "note":
+                    self.put(y, 7, (e.title or "")[:10].ljust(11),
+                             curses.color_pair(C_DIM))
+                    self.put(y, 18, e.detail[:max(0, w - 20)],
+                             curses.color_pair(C_DIM))
+                    continue
+                topics = e.meta.get("topics", [])
+                on = bool(topics) and all(x in self.cam_enabled for x in topics)
+                if not e.meta.get("available", True):
+                    self.put(y, 3, " - ", curses.color_pair(C_DIM))
+                else:
+                    self.put(y, 3, "[x]" if on else "[ ]",
+                             curses.color_pair(C_OK if on else C_DIM) | curses.A_BOLD)
+                self.put(y, 7, (e.title or "")[:10].ljust(11), attr)
+                self.put(y, 18, e.detail[:34].ljust(35), curses.color_pair(C_DIM))
+                note = e.meta.get("note", "")
+                self.put(y, 54, note[:max(0, w - 56)],
+                         curses.color_pair(C_OK if e.meta.get("live") else C_DIM)
+                         | (curses.A_BOLD if e.meta.get("live") else 0))
                 continue
             self.put(y, 3, name, attr | (curses.A_BOLD if e.usable else 0))
             self.put(y, 25, (e.title or "")[:30].ljust(31),

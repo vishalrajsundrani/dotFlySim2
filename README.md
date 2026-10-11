@@ -34,6 +34,10 @@ simulation today and a real Matrice 4E tomorrow, unchanged.
 4. [What may run alongside what](#4-what-may-run-alongside-what)
 5. [When a setting may be changed](#5-when-a-setting-may-be-changed)
 6. [Cameras](#6-cameras)
+   · [choose what renders](#61-choose-what-renders-before-you-start)
+   · [why a second direction is often free](#62-why-a-second-direction-is-often-free)
+   · [rendering vs streaming](#63-rendering-is-not-the-same-as-streaming)
+   · [switching from a mission](#64-switching-from-a-mission)
 6b. [Recording and replaying a flight](#6b-recording-and-replaying-a-flight)
 7. [Adding a world, a drone, a mission](#7-adding-a-world-a-drone-a-mission)
 8. [Troubleshooting](#8-troubleshooting)
@@ -246,44 +250,170 @@ A locked setting shows `⨯ sim up` where its key would be.
 
 ## 6. Cameras
 
-**Choose your cameras before you start the simulation.** The set is fixed for
-the duration of a run: `c` is locked while the simulation is up, and shows
-`⨯ sim up` where its key would be.
+The aircraft has two camera systems and they work differently, so walker
+treats them differently.
 
-That is a policy, not a limitation of the mechanism. Rendering is
-demand-driven — every camera is `always_on=false` in the composed model and its
-bridge row is lazy, so Gazebo renders a lens only while something is subscribed,
-and switching a camera on *is* subscribing to it. Switching a 4K lens on
-mid-flight therefore works, but it takes GPU time away from the physics and can
-push the simulation below real time in the middle of a mission, quietly changing
-the flight you were measuring. Fixing the set up front keeps a run's cost
-constant.
+| | what it is | how you choose |
+| --- | --- | --- |
+| **payload** | the gimbal camera: three lenses, four resolution tiers | one lens reaches `main_camera_stream`; zoom picks which |
+| **perception** | six fisheyes for obstacle avoidance | chosen by **direction**, one streaming at a time |
 
-The cost of each lens, measured:
+### 6.1 Choose what renders, before you start
 
-| what is on | Gazebo CPU |
+**The camera set is fixed for a run.** `c` is locked while the simulation is
+up and shows `⨯ sim up` where its key would be.
+
+That is a policy, not a limit of the mechanism. Rendering is demand-driven —
+every camera is `always_on=false` in the composed model and its bridge row is
+lazy, so Gazebo renders a lens only while something is subscribed, and
+switching one on *is* subscribing. Switching a 4K lens on mid-flight therefore
+works, but it takes GPU time from the physics and can push the simulation
+below real time in the middle of a mission, quietly changing the flight you
+were measuring. Fixing the set up front keeps a run's cost constant.
+
+With the simulation stopped, press `c`:
+
+```
+ CAMERAS                                        4 lenses · 39.6 MP/s
+
+ PERCEPTION   six fisheyes shared between five directions; one streams at a time
+   [x] FRONT   fl+fr  260 mm  0.4-22.5 m    streaming now
+   [ ] DOWN    dl+dr  100 mm  0.3-18.8 m    +20 MP/s
+   [x] REAR    rr+rl  260 mm  0.4-22.5 m
+   [x] LEFT    rl+fl  370 mm  0.5-32 m      free · shares fl,rl
+   [x] RIGHT   fr+rr  370 mm  0.5-32 m      free · shares fr,rr
+       UP      no upward stereo pair on the M4E
+
+ PAYLOAD      one lens reaches main_camera_stream; zoom picks which
+   [x] wide · FHD       1920x1080 · @30 Hz · 71° · 62.2 MP/s
+   [ ] wide · 4K        3840x2160 · @30 Hz · 71° · 248.8 MP/s
+   [ ] medium tele · FHD  ...
+```
+
+`space` toggles the row under the cursor, `1`–`4` apply the shortcuts
+`none` / `fisheye` / `payload` / `all`, and the set is applied when you press
+`s`.
+
+### 6.2 Why a second direction is often free
+
+The six fisheyes are **shared between five directions**. Four sit at the
+corners and two underneath, and a direction is a *pair* drawn from them:
+
+```
+       FL o-----------o FR        FRONT = fl+fr      LEFT  = fl+rl
+          |           |           REAR  = rr+rl      RIGHT = fr+rr
+       RL o-----------o RR        DOWN  = dl+dr
+              dl  dr  (underneath)
+```
+
+So turning FRONT and REAR on gives you **LEFT and RIGHT at no extra cost** —
+all four lenses are already rendering. The screen shows this as `free · shares
+fl,rl` rather than charging you twice, and the `+N MP/s` on each row is the
+marginal cost *given what is already on*, recomputed every time you toggle
+something.
+
+`UP` is listed and cannot be selected: the M4E has no upward stereo pair, and
+`start_perception UP` is refused on the aircraft too.
+
+### 6.3 Rendering is not the same as streaming
+
+Two different things choose what you see, at two different times:
+
+| decision | who makes it | when |
+| --- | --- | --- |
+| which lenses **render** | you, on this screen | before a run, fixed for its duration |
+| which direction **streams** | a mission, via `start_perception` | any time during a run |
+
+A mission switches from FRONT to DOWN mid-flight on real hardware, so the
+simulation allows it too. The two meet in one place: `start_perception` can
+only select a direction whose lenses this run is rendering, and refuses by
+name if they are not —
+
+```
+DOWN is supported by the aircraft but nothing is rendering
+/drone/perception/dl/image_raw, /drone/perception/dr/image_raw in this
+session. Enable that direction on walker's camera screen before starting
+the simulation.
+```
+
+The direction currently streaming is marked `streaming now` on the camera
+screen. It is read off the live graph, not remembered, so a bridge restart
+cannot leave it showing something stale.
+
+### 6.4 Switching from a mission
+
+Both camera systems are switched with the aircraft's own services, so the
+calls below work unchanged on hardware. See `CPP_DESIGN.md` §7 for C++, and
+`ROS2_ARCHITECTURE.md` §6 for the full surface.
+
+```bash
+# perception: pick a direction (FRONT, REAR, LEFT, RIGHT, DOWN)
+ros2 service call /wrapper/psdk_ros2/start_perception \
+  psdk_interfaces/srv/PerceptionStereoVisionSetup \
+  "{stereo_cameras_direction: 'DOWN', start_stop: true}"
+
+# payload: index 1 is the gimbal camera, 7 the FPV camera
+#   camera_source 0 DEFAULT / 1 M4E_VIS  -> FHD
+#   camera_source 3 M4E_4K               -> 4K
+ros2 service call /wrapper/psdk_ros2/camera_setup_streaming \
+  psdk_interfaces/srv/CameraSetupStreaming \
+  "{payload_index: 1, camera_source: 3, start_stop: true, decoded_output: true}"
+
+# payload lens follows zoom, exactly as on the aircraft:
+#   < 3x wide, 3-7x medium tele, > 7x tele
+ros2 service call /wrapper/psdk_ros2/camera_set_optical_zoom \
+  psdk_interfaces/srv/CameraSetOpticalZoom "{payload_index: 1, zoom_factor: 5.0}"
+```
+
+**`main_camera_stream` changes size while it runs.** Switching lens or source
+changes the frame geometry mid-stream, because that is what the aircraft does:
+a real recording moves between 1440×1080 and 1920×1080 five times in three
+minutes. **Do not cache width, height or intrinsics from the first frame** —
+code that does works here and on hardware only until the operator changes
+mode.
+
+### 6.5 What the lenses cost
+
+| what is on | cost |
+| --- | --- |
+| one perception direction (2 lenses) | ~20 MP/s |
+| all five directions (6 lenses) | ~60 MP/s |
+| payload, wide FHD | ~62 MP/s |
+| payload, wide 4K | ~249 MP/s |
+| every payload sensor at once | ~1074 MP/s |
+
+These are computed from the models by `tools/sdf_cameras.py`, not measured, so
+they track the SDF rather than drifting from it. The older wall-clock
+measurements below were taken **before** the perception lenses became
+wide-angle RGB sensors and are kept only as an order of magnitude; they want
+re-measuring with `tools/gz_cpu.sh`.
+
+| what was on | Gazebo CPU (stale) |
 |---|---|
 | nothing | ~41% |
 | one fisheye | ~40% |
 | two fisheyes | 99.8% |
 | four cameras | 103.0% |
-| all off again | 41.0% |
 
-With the simulation stopped, press `c` for **all 19 lenses individually** —
-3 payload lenses × 4 tiers (photo, 4K, FHD, preview), plus 7 vision cameras
-(forward, backward and lateral pairs, and downward). `1`–`4` apply the
-shortcuts `none`, `fisheye`, `payload`, `all`; space toggles one. The set is
-applied when you press `s`.
+### 6.6 RViz is a camera switch too
 
-**RViz is a camera switch too.** `config/rviz/cameras.rviz` carries one Image
-display per camera, all disabled. Enabling a display subscribes, and
-subscribing is what makes the lens render — so ticking a box turns that camera
-on and unticking it gives the GPU time back.
+`config/rviz/cameras.rviz` carries one Image display per camera, all disabled.
+Enabling a display subscribes, and subscribing is what makes the lens render —
+so ticking a box turns that camera on and unticking it gives the GPU time
+back.
 
 > Every image display must be **Best Effort**. Image streams are
 > `SensorDataQoS`; a reliable subscriber never matches them and shows an empty
 > panel *with no error at all*. This is the single most common "the cameras are
 > broken" report, and the cameras are fine.
+
+### 6.7 If you are modelling the cameras
+
+`reports/CAMERA_ARCHITECTURE.md` is the design record: why there are six
+lenses and not seven, why they are `wideanglecamera` with an equidistant lens
+rather than pinholes, how `config/perception_calib.yaml` is generated, and
+which psdk_ros2 behaviours (including one upstream bug) are reproduced
+deliberately.
 
 ---
 
@@ -443,11 +573,24 @@ bridge/                 the PSDK bridge (simty): routes, converters, services
 simsupport/             the gimbal rig and sensor models
 models/  worlds/        content, scanned every start
 projects/               C++ missions
-config/                 dds.xml, rviz configs
+config/                 dds.xml, rviz configs, perception_calib.yaml
 tools/                  the composer, the surface checker, the powerline generator
-reports/                the scale audit
+reports/                audits, calibration records and the reference papers
 ```
 
 - [CPP_DESIGN.md](CPP_DESIGN.md) — writing a mission that also flies real hardware
 - [ROS2_ARCHITECTURE.md](ROS2_ARCHITECTURE.md) — the node graph, every topic and service
-- [VERSION2_PLAN.md](VERSION2_PLAN.md) — the design, and why each decision was made
+- [VERSION2_PLAN.md](VERSION2_PLAN.md) — the original plan and why each decision
+  was made. A record, not a description of the code as it stands.
+
+Under `reports/`, when you need the detail behind a number:
+
+- [CAMERA_ARCHITECTURE.md](reports/CAMERA_ARCHITECTURE.md) — why six fisheyes
+  and not seven, why they are wide-angle rather than pinhole, and which
+  psdk_ros2 behaviours are reproduced deliberately
+- [CAMERA_FIDELITY.md](reports/CAMERA_FIDELITY.md) — the survey of what differs
+  between this simulation, a real M4E recording, and the documentation
+- [IMU_CALIBRATION.md](reports/IMU_CALIBRATION.md) — how the IMU noise was
+  measured from a real aircraft, and what could not be measured
+- `papers/` — the references behind both, with a map from each method to its
+  source

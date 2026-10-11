@@ -206,10 +206,96 @@ it looks — not an error.
 
 ### Only while a camera is on (4)
 
-`main_camera_stream` (rgb8 1440×1080, ~11 Hz), `fpv_camera_stream`,
-`perception_stereo_left_stream`, `perception_stereo_right_stream`
-(mono8 704×704, ~18 Hz). Opt-in because an uncompressed 1080p frame is ~6 MB
-and two feeds starve the control routes.
+| topic | format | rate | notes |
+| --- | --- | --- | --- |
+| `main_camera_stream` | `rgb8`, **size varies** | 23.5 Hz | the gimbal camera |
+| `fpv_camera_stream` | `rgb8` 640×360 | 5 Hz | `payload_index: 7`; see below |
+| `perception_stereo_left_stream` | `mono8` 704×704 | 20 Hz | the chosen direction's left eye |
+| `perception_stereo_right_stream` | `mono8` 704×704 | 20 Hz | its right eye |
+
+Opt-in because an uncompressed 1080p frame is ~6 MB and two feeds starve the
+control routes.
+
+Three things about these differ from what you might assume, and all three
+match the aircraft:
+
+**`main_camera_stream` changes size while it runs.** Switching lens or stream
+source changes the frame geometry mid-stream. A real M4E recording moves
+between 1440×1080 and 1920×1080 five times in 184 s, with `header.frame_id`
+constant throughout. **Do not cache width, height or intrinsics from the first
+frame.**
+
+**23.5 Hz is measured, not documented.** The PSDK PDF says 11 Hz; the aircraft
+delivers 23.5 Hz mean over 3,898 frames. The simulation used to cap this route
+at 5 Hz, which made it 4.7× slower than the thing it imitates.
+
+`fpv_camera_stream` keeps its 5 Hz cap, and that is **not** known to match the
+aircraft: the reference recording contains no FPV stream at all, and the PSDK
+documentation lists the topic under "no data on this aircraft". 5 Hz is a
+simulation choice made for bandwidth, not a measurement. If you have a
+recording with FPV in it, measure it and raise the cap the way
+`main_camera_stream`'s was raised.
+
+**The two stereo topics are fixed names whose content changes.** They carry
+whichever direction `start_perception` last accepted. There is no second pair
+of topics for a second direction, because the aircraft has none.
+
+### Switching cameras
+
+Two services, and they are the aircraft's own, so the same calls work on
+hardware.
+
+```bash
+# perception: FRONT, REAR, LEFT, RIGHT, DOWN. One at a time.
+ros2 service call /wrapper/psdk_ros2/start_perception \
+  psdk_interfaces/srv/PerceptionStereoVisionSetup \
+  "{stereo_cameras_direction: 'DOWN', start_stop: true}"
+
+# payload
+ros2 service call /wrapper/psdk_ros2/camera_setup_streaming \
+  psdk_interfaces/srv/CameraSetupStreaming \
+  "{payload_index: 1, camera_source: 0, start_stop: true, decoded_output: true}"
+```
+
+`camera_setup_streaming`'s four fields all do something:
+
+| field | accepted | effect |
+| --- | --- | --- |
+| `payload_index` | 1 (NO_1), 7 (FPV) | **chooses the topic**: `main_camera_stream` or `fpv_camera_stream` |
+| `camera_source` | 0 DEFAULT, 1 M4E_VIS, 3 M4E_4K | 0 and 1 stream the FHD tier, 3 the 4K tier |
+| `start_stop` | — | enables or disables that route |
+| `decoded_output` | `true` only | `false` is refused: upstream would publish an H.264 bitstream inside an Image with `encoding: "h264"`, and there is no encoder here |
+
+`payload_index` 2 and 3 are refused. Upstream handles neither and reads an
+uninitialised result for them, returning an arbitrary answer while streaming
+nothing; refusing is closer to the truth than copying undefined behaviour.
+
+`camera_source` values are **per aircraft and reused across models** —
+`H20_WIDE`, `M30_ZOOM`, `M3E_VIS` and `M4E_VIS` are all `1` — so a value only
+means something alongside `camera_get_type`.
+
+**`frame_id` reproduces an upstream bug on purpose.** psdk_ros2 derives it
+from a `std::map` whose keys collide, so the surviving names belong to an H20
+whatever is flying:
+
+| `camera_source` | `header.frame_id` published | width |
+| --- | --- | --- |
+| 0 DEFAULT | `default_optical_link` | 1920 |
+| 1 M4E_VIS | `h20_wide_optical_link` | 1920 |
+| 3 M4E_4K | `h20t_ir_optical_link` | 3840 |
+
+The first row is exactly what a real M4E recording contains. Code keying off
+`frame_id` must see here what it will see there. Set the
+`main_camera_true_frame_id` parameter to emit M4E names instead.
+
+**The perception pair your direction maps to is data, not a naming
+convention.** `config/perception_calib.yaml` — generated from the model by
+`tools/gen_perception_calib.py` — says which sensor is the left *eye* of each
+direction, along with intrinsics, distortion and `T_cam_imu`. For a rearward
+or sideways pair the sensor whose name says "left" is not the left eye:
+looking aft, the airframe's rear-right corner is on your left. The aircraft
+never populates `perception_camera_parameters`, so a file is what hardware
+reads too.
 
 ### Not synthesised (7)
 
@@ -253,7 +339,10 @@ be worse than their absence.
 
 ## 6. Services
 
-All 56 are served, with introspection on.
+All 56 are defined, with introspection on. **42 are advertised by default**;
+the 14 camera-settings services ship disabled because they store a value and
+change no pixel, and a disabled route is never created, so a caller gets
+`service not available` until it is enabled from walker's SERVICES screen.
 
 | group | n | services |
 |---|---|---|
@@ -266,8 +355,16 @@ All 56 are served, with introspection on.
 | camera zoom/focus | 4 | `camera_set_optical_zoom`, `camera_get_optical_zoom`, `camera_set_infrared_zoom`, `camera_get_focus_ring_range` |
 | camera media | 6 | `camera_setup_streaming`, `camera_get_type`, `camera_get_laser_ranging_info`, `camera_get_sd_storage_info`, `camera_format_sd_card`, `camera_get_file_list_info` |
 
-Plus three **extensions** not on a real M4E, useful in simulation and marked as
-such: `camera_set_stream_source`, `gimbal_set_mode`, `gimbal_reset`.
+Plus two **extensions**: `gimbal_set_mode` and `gimbal_reset`. Both are real
+psdk_ros2 services; they are absent only from the PDF transcription in
+`tools/psdk_surface.py`, which is incomplete.
+
+`camera_set_stream_source` **used to be here and is gone.** There is no
+`CameraSetStreamSource.srv` upstream and no handler for it: it was this
+simulation's own invention, and a mission written against it would have failed
+on the aircraft with "service not available". The lens is selected the way the
+aircraft selects it, through `camera_set_optical_zoom`; the stream is selected
+through `camera_source` on `camera_setup_streaming`.
 
 **Introspection is on for every served service.** rosbag2 records a service
 *call* through its `<service>/_service_event` topic, and a server only

@@ -222,6 +222,20 @@ SETTINGS: tuple[SettingRule, ...] = (
         "the camera set is fixed for a run so its cost cannot change mid-flight; "
         "choose it before starting, and it is applied the moment the simulation "
         "comes up"),
+    # TWO CONTROLS, TWO TIMES, AND THEY ARE NOT THE SAME DECISION.
+    #
+    # The rule above governs which LENSES RENDER, and is locked for a run
+    # because rendering cost must not change under a mission being measured.
+    # Which DIRECTION STREAMS is a different choice, made at run time by the
+    # aircraft's own start_perception service, and it has to stay open: a
+    # payload switches from FRONT to DOWN mid-flight on real hardware.
+    #
+    # They meet in one place. start_perception can only select a direction
+    # whose two lenses are among the ones this run is rendering, so the bridge
+    # checks for publishers on that direction's pair and refuses by name if
+    # they are absent. There is no rule here for it because walker does not
+    # gate it; the gate lives where the service is served, in
+    # registry._h_start_perception, which is also where a PSDK client meets it.
     SettingRule(
         "lens", SIM_STOPPED, "which payload lens feeds the stream",
         "part of the camera set, and fixed for the same reason"),

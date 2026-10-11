@@ -323,6 +323,26 @@ class RosWatcher:
                     out[k] = (len(dq) - 1) / span if span > 0 else 0.0
             return out
 
+    def perception_active(self, pairs: dict) -> str:
+        """Which stereo direction is actually streaming, read off the graph.
+
+        The bridge subscribes to exactly the pair for the direction
+        start_perception last accepted, so the live direction is observable
+        rather than something walkerd has to be told. Asking the graph also
+        survives a bridge restart, where any state walkerd had cached would be
+        stale and confidently wrong.
+        """
+        node = getattr(self, "_node", None)
+        if node is None or not pairs:
+            return ""
+        for direction, topics in pairs.items():
+            try:
+                if topics and all(node.count_subscribers(t) > 0 for t in topics):
+                    return direction
+            except Exception:
+                return ""
+        return ""
+
     def links(self, wrapper: bool = True) -> list[dict]:
         r = self.rates()
         out = []

@@ -98,7 +98,7 @@
            Matrice 4E: rosbag bag_000026, 184 s, from the 6.3 s the aircraft
            sat on the ground before takeoff. tools/imu_from_bag.py does the
            measuring and rewrites this block; do not hand-edit it, re-run the
-           tool. The full derivation is in IMU_CALIBRATION.md.
+           tool. The full derivation is in reports/IMU_CALIBRATION.md.
 
            Three things about these values are not obvious.
 
@@ -238,312 +238,242 @@
         </navsat>
       </sensor>
 
-      <!-- ===================================================================
-           FORWARD PERCEPTION STEREO PAIR
+            <!-- ===================================================================
+           THE PERCEPTION LENSES: SIX, SHARED BETWEEN FIVE DIRECTIONS
            ===================================================================
-           The obstacle-avoidance cameras, as PSDK exposes them. On a real M4E
-           these reach a payload through DjiPerception_SubscribePerception-
-           Image(), and psdk_ros2 republishes them on
-           perception_stereo_left_stream / ..._right_stream. Format and rate
-           are taken from that aircraft, measured rather than assumed:
-           mono8 704x704 at ~20 Hz (psdk-ros2 MANIFOLD3_FOXY_PSDK316_SETUP.md).
+           DJI publishes "six HD low-light fisheye vision sensors" and an
+           omnidirectional BINOCULAR system covering five directions. Six
+           lenses cannot give five directions two lenses each, so the lenses
+           are shared, and the published ranges say how:
 
-           ON base_link WITH A POSE, NOT ON A LINK OF THEIR OWN. A new link
-           needs an <inertial> block, and any mass there changes the vehicle's
-           total mass and inertia tensor, both tuned in this file and in the
-           4900_gz_m4e airframe. Sensors are massless, so a pose offset buys
-           the same geometry for nothing and cannot perturb the flight model.
+             forward / backward   0.4 to 22.5 m     shorter baseline
+             lateral              0.5 to 32 m       LONGER baseline
+             downward             0.3 to 18.8 m
 
-           NOT ON m4e_camera EITHER. That model is teleported 50 times a second
-           by gui/gimbal_stabilizer.py to cancel airframe roll and pitch, which
-           is right for a gimbal and wrong for these: DJI's perception cameras
-           are rigidly body-fixed, and a stereo pair that silently held itself
-           level would make visual-inertial fusion look far better here than it
-           can ever be on the aircraft.
+           A longer range needs a longer baseline. The lateral pair is
+           therefore a FRONT lens paired with a REAR lens, whose separation
+           along the airframe exceeds the side to side separation of the two
+           front lenses. Four lenses at the corners, two underneath:
 
-           GEOMETRY IS AN ASSUMPTION, and deliberately kept in one place.
-           DJI publishes neither the baseline nor the intrinsics of these
-           cameras, and DjiPerception_GetStereoCameraParameters() segfaults on
-           the M4E, so there is no way to read them off the aircraft either.
-           The 0.09 m baseline is chosen against the 0.64 x 0.56 m airframe;
-           90 degrees is a rectilinear stand-in for a fisheye pair's usable
-           centre. Both numbers are mirrored in config/perception_calib.yaml,
-           which is what any consumer should read. Change them together.
+             FRONT = fl + fr      baseline 0.26 m   (side to side)
+             REAR  = rl + rr      baseline 0.26 m
+             LEFT  = fl + rl      baseline 0.37 m   (nose to tail)
+             RIGHT = fr + rr      baseline 0.37 m
+             DOWN  = dl + dr      baseline 0.10 m
 
-           Intrinsics by the same rule as the payload lenses (see the note in
-           models/m4e_camera/model.sdf):
-             fx = (w/2)/tan(hfov/2) = 352/tan(45 deg) = 352
-             square sensor so vfov = hfov, fy = fx; cx = w/2, cy = h/2
-           Rendering is demand-driven: both rows in config/bridge.yaml are
-           lazy, so with no subscriber gz renders neither camera. -->
-      <!-- ===================================================================
-           THE FORWARD VISION PAIR, against the real aircraft's spec.
+           0.37 / 0.26 = 1.42, and 32 / 22.5 = 1.42. The ORDERING is derived;
+           the absolute values are chosen to fit the airframe and are not from
+           DJI, who do not publish them. Stereo depth scales with baseline, so
+           a node calibrated here must be recalibrated against the aircraft.
 
-           The M4E carries SIX low-light fisheye lenses giving omnidirectional
-           binocular vision. Only the FORWARD pair is modelled, because only
-           the forward pair reaches the wrapper surface: psdk_ros2 publishes
-           perception_stereo_left_stream and perception_stereo_right_stream and
-           nothing else. Modelling the other four would cost GPU time that no
-           topic would ever carry.
+           WHAT THE PREVIOUS MODEL GOT WRONG. It had seven sensors: a forward
+           pair, a rear pair, and a SINGLE camera each for left, right and
+           down. A single camera cannot serve start_perception, which must
+           publish a left and a right stream for whichever direction is
+           chosen. Those three directions could never have worked.
 
-           FAITHFUL HERE
-             horizontal FOV   90 degrees, matching the published figure
-             image            704x704 mono8, matching what the wrapper streams
-             rate             20 Hz, matching the observed stream rate
+           WHY THE CORNER LENSES ARE YAWED 45 DEGREES OUTWARD. Each one has to
+           serve two directions at once: fl is the left eye of FRONT and also
+           an eye of LEFT. Pointing it diagonally, with a fisheye wide enough
+           to cover from the nose round to the beam, is the only arrangement
+           that does both. This is why they must be fisheyes and not pinholes:
+           at 190 degrees a rectilinear projection does not exist.
 
-           NOT FAITHFUL, AND WHY
-             vertical FOV     the real forward pair is 90 H by 135 V. A square
-                              704x704 image cannot express that: Gazebo derives
-                              vertical FOV from the image aspect, so this pair
-                              sees 90 by 90. Matching the published 704x704
-                              stream was judged more important than matching
-                              the lens, since a consumer sees the stream.
-             range            the real system measures 0.4 to 200 m forward.
-                              A camera pair in Gazebo has no such limit; a
-                              perception node that assumes one must impose it.
+           PROJECTION: equidistant, r = f * theta, the standard fisheye model
+           and the one Kalibr calls "equidistant". The previous model used
+           Gazebo's default rectilinear projection even for the 160 degree
+           downward lens, where it is not merely inaccurate but undefined.
 
-           Baseline: 90 mm (pose y = +/-0.045), mounted 0.30 m forward of the
-           body origin on the nose. DJI does not publish the baseline, so this
-           is a plausible value for the airframe rather than a measured one,
-           and it IS load bearing: stereo depth scales with it, so a node
-           calibrated against this simulation must be recalibrated against the
-           aircraft.
+           Equidistant focal length is f = w / hfov:
+             corners   704 / 3.3161 = 212.3 px   (190 deg)
+             downward  704 / 2.7925 = 252.1 px   (160 deg)
+           These are published in config/perception_calib.yaml rather than in
+           an SDF intrinsics block, which describes a pinhole and would be
+           read as one. The aircraft never populates
+           perception_camera_parameters, so a file is also what hardware uses.
 
-           Source: DJI Matrice 4 Series specifications, enterprise.dji.com
+           ON base_link WITH A POSE, NOT ON LINKS OF THEIR OWN. A new link
+           needs an inertial block, and mass there changes the vehicle's total
+           mass and inertia, both tuned in this file and in the 4900_gz_m4e
+           airframe.
+
+           FORMAT: the aircraft publishes mono8 704x704 at 20 Hz
+           (psdk-ros2 MANIFOLD3_FOXY_PSDK316_SETUP.md), and the WRAPPER TOPIC
+           still does. These sensors render R8G8B8 anyway, because
+           gz-sensors' WideAngleCameraSensor supports exactly one pixel format
+           (RGB_INT8) and errors out on L8 with "Unsupported pixel format [1]".
+           A fisheye projection is worth more than saving the conversion, so
+           the bridge converts RGB to mono8 on the way out
+           (converters.stereo_mono_image) and a consumer sees what the
+           aircraft sends. Rendering cost is counted in pixels and unchanged;
+           bus cost inside gz is 3x, which is why these stay lazy.
+
+           ORIGINAL NOTE, still true of the aircraft: mono8 704x704 at 20 Hz
+           (psdk-ros2 MANIFOLD3_FOXY_PSDK316_SETUP.md). The previous model used
+           640x640 for the downward camera, which had no stated source; all six
+           are now the documented size.
+
+           Rendering is demand driven: compose_sim.py emits every camera row lazy,
+           so with no subscriber gz renders nothing. (config/bridge.yaml is a
+           reference copy; the file ros_gz_bridge reads is generated.)
+
+           Source: DJI Matrice 4 Series specifications, enterprise.dji.com.
+           The corner layout is an INFERENCE from those figures; DJI does not
+           document the physical placement. See reports/CAMERA_ARCHITECTURE.md
            =================================================================== -->
-      <sensor name="perception_front_left" type="camera">
-        <pose>0.30 0.045 0 0 0 0</pose>
+
+      <sensor name="perception_fl" type="wideanglecamera">
+        <pose> 0.185  0.13 0 0 0 0.7854</pose>
         <always_on>true</always_on>
         <update_rate>20</update_rate>
-        <topic>/drone/perception/front/left/image_raw</topic>
-        <gz_frame_id>perception_front_left</gz_frame_id>
+        <topic>/drone/perception/fl/image_raw</topic>
+        <gz_frame_id>perception_fl</gz_frame_id>
         <camera>
-          <horizontal_fov>1.5708</horizontal_fov>
+          <horizontal_fov>3.3161</horizontal_fov>
           <image>
             <width>704</width>
             <height>704</height>
-            <format>L8</format>
+            <format>R8G8B8</format>
           </image>
           <clip>
             <near>0.1</near>
             <far>200.0</far>
           </clip>
           <lens>
-            <intrinsics>
-              <fx>352.0</fx>
-              <fy>352.0</fy>
-              <cx>352.0</cx>
-              <cy>352.0</cy>
-              <s>0.0</s>
-            </intrinsics>
+            <type>equidistant</type>
+            <scale_to_hfov>true</scale_to_hfov>
+            <cutoff_angle>1.6581</cutoff_angle>
+            <env_texture_size>512</env_texture_size>
           </lens>
         </camera>
       </sensor>
 
-      <sensor name="perception_front_right" type="camera">
-        <pose>0.30 -0.045 0 0 0 0</pose>
+      <sensor name="perception_fr" type="wideanglecamera">
+        <pose> 0.185 -0.13 0 0 0 -0.7854</pose>
         <always_on>true</always_on>
         <update_rate>20</update_rate>
-        <topic>/drone/perception/front/right/image_raw</topic>
-        <gz_frame_id>perception_front_right</gz_frame_id>
+        <topic>/drone/perception/fr/image_raw</topic>
+        <gz_frame_id>perception_fr</gz_frame_id>
         <camera>
-          <horizontal_fov>1.5708</horizontal_fov>
+          <horizontal_fov>3.3161</horizontal_fov>
           <image>
             <width>704</width>
             <height>704</height>
-            <format>L8</format>
+            <format>R8G8B8</format>
           </image>
           <clip>
             <near>0.1</near>
             <far>200.0</far>
           </clip>
           <lens>
-            <intrinsics>
-              <fx>352.0</fx>
-              <fy>352.0</fy>
-              <cx>352.0</cx>
-              <cy>352.0</cy>
-              <s>0.0</s>
-            </intrinsics>
+            <type>equidistant</type>
+            <scale_to_hfov>true</scale_to_hfov>
+            <cutoff_angle>1.6581</cutoff_angle>
+            <env_texture_size>512</env_texture_size>
           </lens>
         </camera>
       </sensor>
 
-      <!-- ===================================================================
-           THE REST OF THE OMNIDIRECTIONAL VISION SYSTEM.
-
-           The M4E carries six low light fisheye lenses plus downward sensing.
-           Only the forward pair reaches the wrapper surface (psdk_ros2 streams
-           perception_stereo_left/right and nothing else), but the others are
-           modelled because walker can switch any camera on individually and
-           RViz can look through it, and because an obstacle avoidance node
-           under test needs something behind and beside the aircraft to see.
-
-           Every one of these is OFF unless something subscribes: the composer
-           sets always_on=false and ros_gz_bridge is lazy, so an unused lens
-           costs nothing. Measured in SPIKE-1.
-
-           FIELDS OF VIEW, from DJI's published figures:
-             forward / backward   90 deg H, 135 deg V, 0.4 to 200 m
-             lateral              90 deg H,  90 deg V, 0.5 to 200 m
-             downward            160 deg,             0.3 to  18.8 m
-
-           The 135 deg vertical of the forward and backward pairs is NOT
-           reproduced: these are square images, so Gazebo derives 90 deg
-           vertical from the aspect. Matching the published 704x704 stream was
-           judged more important than matching the lens.
-
-           Intrinsics are derived, not guessed: fx = (width/2) / tan(hfov/2),
-           with the principal point at the image centre.
-
-           Source: DJI Matrice 4 Series specifications, enterprise.dji.com
-           =================================================================== -->
-      <!-- Backward vision, left. 90 deg H per DJI's forward/backward figure. -->
-      <sensor name="perception_back_left" type="camera">
-        <pose>-0.30 0.045 0 0 0 3.1416</pose>
+      <sensor name="perception_rl" type="wideanglecamera">
+        <pose>-0.185  0.13 0 0 0 2.3562</pose>
         <always_on>true</always_on>
         <update_rate>20</update_rate>
-        <topic>/drone/perception/back/left/image_raw</topic>
-        <gz_frame_id>perception_back_left</gz_frame_id>
+        <topic>/drone/perception/rl/image_raw</topic>
+        <gz_frame_id>perception_rl</gz_frame_id>
         <camera>
-          <horizontal_fov>1.5708</horizontal_fov>
+          <horizontal_fov>3.3161</horizontal_fov>
           <image>
             <width>704</width>
             <height>704</height>
-            <format>L8</format>
+            <format>R8G8B8</format>
           </image>
           <clip>
             <near>0.1</near>
             <far>200.0</far>
           </clip>
           <lens>
-            <intrinsics>
-              <fx>352.0</fx>
-              <fy>352.0</fy>
-              <cx>352.0</cx>
-              <cy>352.0</cy>
-              <s>0.0</s>
-            </intrinsics>
+            <type>equidistant</type>
+            <scale_to_hfov>true</scale_to_hfov>
+            <cutoff_angle>1.6581</cutoff_angle>
+            <env_texture_size>512</env_texture_size>
           </lens>
         </camera>
       </sensor>
 
-      <!-- Backward vision, right. -->
-      <sensor name="perception_back_right" type="camera">
-        <pose>-0.30 -0.045 0 0 0 3.1416</pose>
+      <sensor name="perception_rr" type="wideanglecamera">
+        <pose>-0.185 -0.13 0 0 0 -2.3562</pose>
         <always_on>true</always_on>
         <update_rate>20</update_rate>
-        <topic>/drone/perception/back/right/image_raw</topic>
-        <gz_frame_id>perception_back_right</gz_frame_id>
+        <topic>/drone/perception/rr/image_raw</topic>
+        <gz_frame_id>perception_rr</gz_frame_id>
         <camera>
-          <horizontal_fov>1.5708</horizontal_fov>
+          <horizontal_fov>3.3161</horizontal_fov>
           <image>
             <width>704</width>
             <height>704</height>
-            <format>L8</format>
+            <format>R8G8B8</format>
           </image>
           <clip>
             <near>0.1</near>
             <far>200.0</far>
           </clip>
           <lens>
-            <intrinsics>
-              <fx>352.0</fx>
-              <fy>352.0</fy>
-              <cx>352.0</cx>
-              <cy>352.0</cy>
-              <s>0.0</s>
-            </intrinsics>
+            <type>equidistant</type>
+            <scale_to_hfov>true</scale_to_hfov>
+            <cutoff_angle>1.6581</cutoff_angle>
+            <env_texture_size>512</env_texture_size>
           </lens>
         </camera>
       </sensor>
 
-      <!-- Lateral vision, left. DJI: 90 H x 90 V, 0.5 to 200 m. -->
-      <sensor name="perception_left" type="camera">
-        <pose>0 0.12 0 0 0 1.5708</pose>
+      <sensor name="perception_dl" type="wideanglecamera">
+        <pose>0  0.05 -0.04 0 1.5708 0</pose>
         <always_on>true</always_on>
         <update_rate>20</update_rate>
-        <topic>/drone/perception/left/image_raw</topic>
-        <gz_frame_id>perception_left</gz_frame_id>
-        <camera>
-          <horizontal_fov>1.5708</horizontal_fov>
-          <image>
-            <width>704</width>
-            <height>704</height>
-            <format>L8</format>
-          </image>
-          <clip>
-            <near>0.1</near>
-            <far>200.0</far>
-          </clip>
-          <lens>
-            <intrinsics>
-              <fx>352.0</fx>
-              <fy>352.0</fy>
-              <cx>352.0</cx>
-              <cy>352.0</cy>
-              <s>0.0</s>
-            </intrinsics>
-          </lens>
-        </camera>
-      </sensor>
-
-      <!-- Lateral vision, right. -->
-      <sensor name="perception_right" type="camera">
-        <pose>0 -0.12 0 0 0 -1.5708</pose>
-        <always_on>true</always_on>
-        <update_rate>20</update_rate>
-        <topic>/drone/perception/right/image_raw</topic>
-        <gz_frame_id>perception_right</gz_frame_id>
-        <camera>
-          <horizontal_fov>1.5708</horizontal_fov>
-          <image>
-            <width>704</width>
-            <height>704</height>
-            <format>L8</format>
-          </image>
-          <clip>
-            <near>0.1</near>
-            <far>200.0</far>
-          </clip>
-          <lens>
-            <intrinsics>
-              <fx>352.0</fx>
-              <fy>352.0</fy>
-              <cx>352.0</cx>
-              <cy>352.0</cy>
-              <s>0.0</s>
-            </intrinsics>
-          </lens>
-        </camera>
-      </sensor>
-
-      <!-- Downward vision. DJI: 160 deg, 0.3 to 18.8 m. Used for landing and low-altitude hold. -->
-      <sensor name="perception_down" type="camera">
-        <pose>0 0 -0.04 0 1.5708 0</pose>
-        <always_on>true</always_on>
-        <update_rate>20</update_rate>
-        <topic>/drone/perception/down/image_raw</topic>
-        <gz_frame_id>perception_down</gz_frame_id>
+        <topic>/drone/perception/dl/image_raw</topic>
+        <gz_frame_id>perception_dl</gz_frame_id>
         <camera>
           <horizontal_fov>2.7925</horizontal_fov>
           <image>
-            <width>640</width>
-            <height>640</height>
-            <format>L8</format>
+            <width>704</width>
+            <height>704</height>
+            <format>R8G8B8</format>
           </image>
           <clip>
             <near>0.1</near>
-            <far>20.0</far>
+            <far>200.0</far>
           </clip>
           <lens>
-            <intrinsics>
-              <fx>56.4</fx>
-              <fy>56.4</fy>
-              <cx>320.0</cx>
-              <cy>320.0</cy>
-              <s>0.0</s>
-            </intrinsics>
+            <type>equidistant</type>
+            <scale_to_hfov>true</scale_to_hfov>
+            <cutoff_angle>1.3963</cutoff_angle>
+            <env_texture_size>512</env_texture_size>
+          </lens>
+        </camera>
+      </sensor>
+
+      <sensor name="perception_dr" type="wideanglecamera">
+        <pose>0 -0.05 -0.04 0 1.5708 0</pose>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <topic>/drone/perception/dr/image_raw</topic>
+        <gz_frame_id>perception_dr</gz_frame_id>
+        <camera>
+          <horizontal_fov>2.7925</horizontal_fov>
+          <image>
+            <width>704</width>
+            <height>704</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>200.0</far>
+          </clip>
+          <lens>
+            <type>equidistant</type>
+            <scale_to_hfov>true</scale_to_hfov>
+            <cutoff_angle>1.3963</cutoff_angle>
+            <env_texture_size>512</env_texture_size>
           </lens>
         </camera>
       </sensor>

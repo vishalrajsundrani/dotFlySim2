@@ -267,7 +267,7 @@ def sheet_stationary(wb, d):
     return ws
 
 
-def _segment(d, which):
+def _segment(d, which, limit_s=None):
     """Raw samples inside the stationary window, for the plotting sheets."""
     topic = GYRO_TOPIC if which == "gyro" else ACCEL_TOPIC
     raw = d["raw"].get(topic)
@@ -278,19 +278,32 @@ def _segment(d, which):
     r = d["result"]
     lo = r["segment_start_s"]
     hi = lo + r["segment_len_s"]
+    if limit_s is not None:
+        hi = min(hi, lo + limit_s)
     m = (t >= lo) & (t <= hi)
-    return t[m] - t[m][0] if m.any() else t[m], x[m]
+    if not m.any():
+        return t[m], x[m]
+    return t[m] - t[m][0], x[m]
 
 
-def sheet_timeseries(wb, d):
-    ws = wb.create_sheet("Stationary samples")
-    title(ws, "The stationary segment, sample by sample", 9)
+def sheet_timeseries(wb, d, name, subtitle, chart_limit_s=None):
+    """Raw samples of one stationary segment, aircraft or simulation.
+
+    The aircraft contributes 6.3 s; a simulated recording contributes over two
+    minutes, because nothing there has to take off.  The full segment is
+    written out either way, but the chart is clipped to a common span so the
+    two sheets can be read against each other instead of one appearing calm
+    merely by being drawn at a 20x wider time scale.
+    """
+    ws = wb.create_sheet(name)
+    title(ws, subtitle, 9)
     widths(ws, {"A": 11, "B": 12, "C": 12, "D": 12, "F": 11, "G": 12, "H": 12, "I": 12})
     anchor = {"gyro": (1, "A"), "accel": (6, "F")}
     for which, (col0, letter) in anchor.items():
         t, x = _segment(d, which)
-        unit = "rad/s" if which == "gyro" else "m/s²"
-        c = ws.cell(3, col0, f"{which} [{unit}]")
+        unit = "rad/s" if which == "gyro" else "m/s^2"
+        c = ws.cell(3, col0, f"{which} [{unit}]  n={len(t)}  "
+                             f"{(t[-1] if len(t) else 0):.1f} s")
         c.font = H2
         header_row(ws, 4, ["t (s)", "x", "y", "z"], start=col0)
         for i in range(len(t)):
@@ -299,64 +312,161 @@ def sheet_timeseries(wb, d):
                 ws.cell(5 + i, col0 + 1 + j, float(x[i, j]))
         if len(t) == 0:
             continue
+        n_chart = len(t)
+        if chart_limit_s is not None:
+            n_chart = int(np.searchsorted(t, chart_limit_s)) or len(t)
         ch = LineChart()
-        ch.title = f"{which} during the stationary segment"
+        ch.title = (f"{which} during the stationary segment"
+                    + (f" (first {chart_limit_s:.1f} s)" if chart_limit_s
+                       and n_chart < len(t) else ""))
         ch.y_axis.title = unit
         ch.x_axis.title = "t (s)"
         ch.height, ch.width = 8, 18
         data = Reference(ws, min_col=col0 + 1, max_col=col0 + 3, min_row=4,
-                         max_row=4 + len(t))
+                         max_row=4 + n_chart)
         ch.add_data(data, titles_from_data=True)
         ws.add_chart(ch, f"{letter}{8 + len(t)}")
     return ws
 
 
-def sheet_psd(wb, d):
-    ws = wb.create_sheet("Spectrum")
-    title(ws, "Why the density is read off the spectrum, not off the variance", 10)
-    widths(ws, {"A": 60})
-    ws.merge_cells("A3:A6")
+def sheet_sampling(wb, phys, sim):
+    """How the two sources are actually sampled, and where the aircraft's
+    recording lost data."""
+    ws = wb.create_sheet("Sampling & dropouts")
+    title(ws, "Sample intervals: the aircraft's recording has gaps, the simulation's does not", 8)
+    widths(ws, {"A": 46, "B": 16, "C": 16, "E": 14, "F": 14, "G": 14})
+    ws.merge_cells("A3:C6")
     c = ws.cell(3, 1,
-        "White sensor noise is flat in frequency. Anything rising at the left of these curves is "
-        "real low-frequency motion — a parked airframe swaying on its legs — and counting it as "
-        "sensor noise would make the simulated IMU noisier than the real part. Anything falling at "
-        "the right is a low-pass filter applied before the data was published, which makes the "
-        "measured density a lower bound.")
+        "Three estimators of the aircraft's rate disagree, and only one is right. "
+        "message_count/duration reports 43.4 Hz because 23.6 s of the recording is missing to "
+        "three write stalls. The median interval reports 52.5 Hz because the interval "
+        "distribution is skewed. The mean over non-dropout intervals reports 49.75 Hz, which is "
+        "the 50 Hz the aircraft runs at and the rate the bridge is capped to.")
     c.alignment = Alignment(wrap_text=True, vertical="top")
     c.fill = FILL_WARN
 
-    r = d["result"]
+    row = 8
+    header_row(ws, row, ["quantity", "aircraft", "simulation"])
+    row += 1
+    pr, sr = phys["result"], (sim or {}).get("result", {})
+    for label, pv, sv in (
+        ("gyro messages", pr["n_gyro"], sr.get("n_gyro")),
+        ("recording span (s)", round(pr["duration"], 1), round(sr.get("duration", 0), 1)),
+        ("count/duration (Hz)", round(pr["n_gyro"] / pr["duration"], 2),
+         round(sr["n_gyro"] / sr["duration"], 2) if sr else None),
+        ("rate, non-dropout mean (Hz)", round(pr["rate_gyro"], 2),
+         round(sr.get("rate_gyro", 0), 2) if sr else None),
+        ("stationary segment (s)", round(pr["segment_len_s"], 1),
+         round(sr.get("segment_len_s", 0), 1) if sr else None),
+    ):
+        ws.cell(row, 1, label).font = H2
+        ws.cell(row, 2, pv)
+        ws.cell(row, 3, sv)
+        for col in (1, 2, 3):
+            ws.cell(row, col).border = BOX
+        row += 1
+
+    # interval histograms
+    col = 5
+    for label, d in (("aircraft", phys), ("simulation", sim)):
+        if d is None:
+            continue
+        raw = d["raw"].get(GYRO_TOPIC)
+        if raw is None:
+            continue
+        t = np.array(raw["t"])
+        dt = np.diff(t) * 1000.0
+        ws.cell(8, col, f"{label}: interval (ms)").font = H2
+        ws.cell(8, col + 1, "count").font = H2
+        h, e = np.histogram(dt[dt < 60], bins=40)
+        for i, (cnt, lo) in enumerate(zip(h, e[:-1])):
+            ws.cell(9 + i, col, round(float(lo), 2))
+            ws.cell(9 + i, col + 1, int(cnt))
+        ch = ScatterChart()
+        ch.title = f"{label}: distribution of sample intervals"
+        ch.x_axis.title = "interval (ms)"
+        ch.y_axis.title = "count"
+        ch.height, ch.width = 8, 14
+        xs = Reference(ws, min_col=col, min_row=9, max_row=8 + len(h))
+        ser = Series(Reference(ws, min_col=col + 1, min_row=8, max_row=8 + len(h)),
+                     xs, title_from_data=True)
+        ser.marker.symbol = "none"
+        ch.series.append(ser)
+        ws.add_chart(ch, f"{get_column_letter(col)}{10 + len(h)}")
+        col += 3
+
+    # the aircraft's dropouts, named
+    raw = phys["raw"].get(GYRO_TOPIC)
+    if raw is not None:
+        t = np.array(raw["t"])
+        dt = np.diff(t)
+        big = np.where(dt > 0.1)[0]
+        r0 = 9 + 45
+        ws.cell(r0, 1, "Dropouts in the aircraft recording (>100 ms)").font = H2
+        header_row(ws, r0 + 1, ["at t (s)", "gap (s)"])
+        for i, k in enumerate(big):
+            ws.cell(r0 + 2 + i, 1, round(float(t[k]), 1))
+            ws.cell(r0 + 2 + i, 2, round(float(dt[k]), 3))
+        ws.cell(r0 + 2 + len(big), 1, "total lost").font = H2
+        ws.cell(r0 + 2 + len(big), 2, round(float(dt[dt > 0.1].sum()), 1))
+    return ws
+
+
+def sheet_psd(wb, phys, sim):
+    ws = wb.create_sheet("Spectrum")
+    title(ws, "Aircraft and simulation spectra, overlaid — the real test of a noise model", 12)
+    widths(ws, {"A": 58})
+    ws.merge_cells("A3:A7")
+    c = ws.cell(3, 1,
+        "White sensor noise is flat in frequency. Anything rising at the left is real "
+        "low-frequency motion — a parked airframe swaying on its legs — and counting it as "
+        "sensor noise would make the simulated IMU noisier than the real part; that is why the "
+        "density is read off the plateau and not off the variance. Anything falling at the right "
+        "is a low-pass filter applied before publication. Matching densities is necessary but not "
+        "sufficient: these curves show whether the simulation matches the aircraft at every "
+        "frequency or only on average.")
+    c.alignment = Alignment(wrap_text=True, vertical="top")
+    c.fill = FILL_WARN
+
     col = 3
     for key in ("gyro", "accel"):
         for axis in AXES:
-            s = r["stats"][key][axis]
-            f = s.get("psd_f") or []
-            p = s.get("psd") or []
-            if not f:
+            series = []
+            for label, d in (("aircraft", phys), ("simulation", sim)):
+                if d is None:
+                    continue
+                st = d["result"]["stats"][key][axis]
+                f, p_ = st.get("psd_f") or [], st.get("psd") or []
+                if f:
+                    series.append((label, f, p_))
+            if not series:
                 continue
-            ws.cell(3, col, "freq (Hz)").font = H2
-            ws.cell(3, col + 1, f"{key}.{axis}").font = H2
-            for i in range(1, len(f)):
-                ws.cell(3 + i, col, round(float(f[i]), 3))
-                ws.cell(3 + i, col + 1, float(p[i]))
+            nmax = max(len(f) for _, f, _ in series)
+            ws.cell(9, col, "freq (Hz)").font = H2
+            for j, (label, f, p_) in enumerate(series):
+                ws.cell(9, col + 1 + j, f"{key}.{axis} {label}").font = H2
+                for i in range(1, len(f)):
+                    ws.cell(9 + i, col, round(float(f[i]), 3))
+                    ws.cell(9 + i, col + 1 + j, float(p_[i]))
             ch = ScatterChart()
             ch.title = f"PSD {key}.{axis}"
             ch.x_axis.title = "Hz"
             ch.y_axis.title = "power / Hz"
             ch.y_axis.scaling.logBase = 10
             ch.height, ch.width = 7, 12
-            xs = Reference(ws, min_col=col, min_row=4, max_row=3 + len(f) - 1)
-            ser = Series(Reference(ws, min_col=col + 1, min_row=3, max_row=3 + len(f) - 1),
-                         xs, title_from_data=True)
-            ser.marker.symbol = "none"
-            ch.series.append(ser)
-            anchor_row = 8 + 15 * (0 if key == "gyro" else 1)
-            ws.add_chart(ch, f"{get_column_letter(col)}{anchor_row + 30}")
-            col += 3
+            xs = Reference(ws, min_col=col, min_row=10, max_row=8 + nmax)
+            for j, _ in enumerate(series):
+                ser = Series(Reference(ws, min_col=col + 1 + j, min_row=9,
+                                       max_row=8 + nmax), xs, title_from_data=True)
+                ser.marker.symbol = "none"
+                ch.series.append(ser)
+            band = 0 if key == "gyro" else 1
+            ws.add_chart(ch, f"{get_column_letter(col)}{12 + nmax + band}")
+            col += 4
     return ws
 
 
-def sheet_allan(wb, d):
+def sheet_allan(wb, d, sim=None):
     ws = wb.create_sheet("Allan deviation")
     title(ws, "Allan deviation — reported, deliberately not adopted", 10)
     widths(ws, {"A": 60})
@@ -375,16 +485,20 @@ def sheet_allan(wb, d):
     col = 3
     for key in ("gyro", "accel"):
         for axis in AXES:
-            s = r["stats"][key][axis]
-            taus, devs = s.get("allan_tau") or [], s.get("allan_dev") or []
-            if not taus:
-                continue
-            ws.cell(8, col, "τ (s)").font = H2
-            ws.cell(8, col + 1, f"{key}.{axis}").font = H2
-            for i, (tau, dev) in enumerate(zip(taus, devs)):
-                ws.cell(9 + i, col, float(tau))
-                ws.cell(9 + i, col + 1, float(dev))
-            col += 3
+            for label, src in (("aircraft", d), ("simulation", sim)):
+                if src is None:
+                    continue
+                st = src["result"]["stats"][key][axis]
+                taus = st.get("allan_tau") or []
+                devs = st.get("allan_dev") or []
+                if not taus:
+                    continue
+                ws.cell(8, col, "tau (s)").font = H2
+                ws.cell(8, col + 1, f"{key}.{axis} {label}").font = H2
+                for i, (tau, dev) in enumerate(zip(taus, devs)):
+                    ws.cell(9 + i, col, float(tau))
+                    ws.cell(9 + i, col + 1, float(dev))
+                col += 3
     ch = ScatterChart()
     ch.title = "Allan deviation (log–log). No floor is reached: the segment is too short."
     ch.x_axis.title = "averaging time τ (s)"
@@ -395,18 +509,37 @@ def sheet_allan(wb, d):
     col = 3
     for key in ("gyro", "accel"):
         for axis in AXES:
-            s = r["stats"][key][axis]
-            n = len(s.get("allan_tau") or [])
-            if not n:
-                continue
-            xs = Reference(ws, min_col=col, min_row=9, max_row=8 + n)
-            ser = Series(Reference(ws, min_col=col + 1, min_row=8, max_row=8 + n),
-                         xs, title_from_data=True)
-            ser.marker.symbol = "none"
-            ch.series.append(ser)
-            col += 3
+            for label, src in (("aircraft", d), ("simulation", sim)):
+                if src is None:
+                    continue
+                n = len(src["result"]["stats"][key][axis].get("allan_tau") or [])
+                if not n:
+                    continue
+                xs = Reference(ws, min_col=col, min_row=9, max_row=8 + n)
+                ser = Series(Reference(ws, min_col=col + 1, min_row=8, max_row=8 + n),
+                             xs, title_from_data=True)
+                ser.marker.symbol = "none"
+                ch.series.append(ser)
+                col += 3
     ws.add_chart(ch, "A9")
     return ws
+
+
+def _accel_mean(d):
+    """Mean of the accelerometer over the stationary segment, as published."""
+    if d is None:
+        return None
+    raw = d["raw"].get(ACCEL_TOPIC)
+    if raw is None:
+        return None
+    t = np.array(raw["t"])
+    x = np.array(raw["xyz"])
+    r = d["result"]
+    lo = r["segment_start_s"]
+    m = (t >= lo) & (t <= lo + r["segment_len_s"])
+    if not m.any():
+        return None
+    return tuple(float(v) for v in x[m].mean(axis=0))
 
 
 def sheet_verification(wb, phys, sim):
@@ -458,6 +591,32 @@ def sheet_verification(wb, phys, sim):
             for col in range(1, 7):
                 ws.cell(row, col).border = BOX
             row += 1
+    # --- the gravity discrepancy -------------------------------------------
+    # Found only because the simulation's raw samples went into this report:
+    # the two sides of the same topic do not carry the same quantity.
+    row += 1
+    gp = _accel_mean(phys)
+    gs = _accel_mean(sim)
+    if gp is not None and gs is not None and abs(abs(gs[2]) - abs(gp[2])) > 1.0:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row + 4, end_column=6)
+        c = ws.cell(row, 1,
+            "SEPARATE FINDING, NOT A NOISE PROBLEM — the two sides of this topic do not carry "
+            "the same quantity.\n"
+            f"Over its stationary segment the aircraft's linear_acceleration averages "
+            f"({gp[0]:+.4f}, {gp[1]:+.4f}, {gp[2]:+.4f}), magnitude {math.dist(gp,(0,0,0)):.4f} m/s^2: "
+            "the flight controller has removed gravity. The simulation averages "
+            f"({gs[0]:+.4f}, {gs[1]:+.4f}, {gs[2]:+.4f}), magnitude {math.dist(gs,(0,0,0)):.4f} m/s^2: "
+            "gravity is present.\n"
+            "The noise calibration is unaffected, because density is read from the spectrum with "
+            "the mean removed. But a consumer that integrates acceleration — a mission, or the "
+            "stereo-inertial SLAM port — sees a 9.8 m/s^2 difference between hardware and "
+            "simulation on the same topic name. This is exactly the class of defect this rig "
+            "exists to catch, and it is a bridge question, not an IMU one.")
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        c.fill = FILL_BAD
+        c.border = BOX
+        row += 6
+
     ch = LineChart()
     ch.title = "Noise density: aircraft vs simulation, per axis"
     ch.y_axis.title = "density"
@@ -467,6 +626,87 @@ def sheet_verification(wb, phys, sim):
     ch.add_data(data, titles_from_data=True)
     ch.set_categories(cats)
     ws.add_chart(ch, f"A{row + 2}")
+    return ws
+
+
+def sheet_bias_model(wb, phys, model_sdf):
+    """What the dynamic-bias parameters actually do, and why they matter here."""
+    ws = wb.create_sheet("Bias model")
+    title(ws, "The dynamic bias process, and why it currently swamps the measured bias", 8)
+    widths(ws, {"A": 26, "B": 14, "C": 14, "D": 16, "E": 18, "F": 18, "G": 46})
+    ws.merge_cells("A3:G8")
+    c = ws.cell(3, 1,
+        "Gazebo adds two different things to a perfect measurement. One is white noise, drawn "
+        "fresh every sample from N(mean, stddev) — that is what the rest of this workbook "
+        "calibrates. The other is a wandering bias, a first-order Gauss-Markov process driven by "
+        "dynamic_bias_stddev and dynamic_bias_correlation_time, implemented in gz-sensors as\n"
+        "    phi = exp(-dt/tau);  sigma_d = sqrt(-sigma_b^2 * tau/2 * expm1(-2*dt/tau));  "
+        "bias <- phi*bias + N(0, sigma_d)\n"
+        "Substituting gives a steady-state variance of sigma_b^2 * tau/2 exactly, so the bias "
+        "this process actually wanders by is NOT dynamic_bias_stddev but sigma_b * sqrt(tau/2). "
+        "With tau = 300 s that is a factor of 12 larger than the parameter suggests. The "
+        "consequence is in the table below.")
+    c.alignment = Alignment(wrap_text=True, vertical="top")
+    c.fill = FILL_WARN
+    ws.row_dimensions[3].height = 15
+
+    row = 10
+    header_row(ws, row, ["channel", "dynamic_bias_stddev", "correlation time (s)",
+                         "wander sigma_b*sqrt(tau/2)", "measured static bias",
+                         "wander / static bias", "consequence"])
+    row += 1
+    first = row
+    for key, group, unit in (("gyro", "angular_velocity", "rad/s"),
+                             ("accel", "linear_acceleration", "m/s^2")):
+        for axis in AXES:
+            st = phys["result"]["stats"][key][axis]
+            m = model_sdf.get(f"{group}.{axis}", {})
+            sb = m.get("dynamic_bias_stddev") or 0.0
+            tau = m.get("dynamic_bias_correlation_time") or 0.0
+            wander = sb * math.sqrt(tau / 2.0) if tau > 0 else 0.0
+            static = abs(st.get("mean") or 0.0)
+            ratio = (wander / static) if static > 0 else None
+            ws.cell(row, 1, f"{group}.{axis} [{unit}]")
+            ws.cell(row, 2, sb).number_format = "0.000E+00"
+            ws.cell(row, 3, tau)
+            ws.cell(row, 4, wander).number_format = "0.000E+00"
+            ws.cell(row, 5, static).number_format = "0.000E+00"
+            cc = ws.cell(row, 6, ratio)
+            if ratio is not None:
+                cc.number_format = "0.00"
+                cc.fill = FILL_BAD if ratio >= 0.5 else FILL_OK
+                ws.cell(row, 7,
+                        "wandering bias is the same size as, or larger than, the bias we measured"
+                        if ratio >= 0.5 else "static bias dominates; usable")
+            else:
+                ws.cell(row, 7, "accelerometer bias not measurable from this bag")
+            for col in range(1, 8):
+                ws.cell(row, col).border = BOX
+            row += 1
+
+    ch = LineChart()
+    ch.title = "Wandering bias vs measured static bias"
+    ch.y_axis.title = "rad/s or m/s^2"
+    ch.height, ch.width = 8, 20
+    data = Reference(ws, min_col=4, max_col=5, min_row=first - 1, max_row=row - 1)
+    cats = Reference(ws, min_col=1, min_row=first, max_row=row - 1)
+    ch.add_data(data, titles_from_data=True)
+    ch.set_categories(cats)
+    ws.add_chart(ch, f"A{row + 2}")
+
+    row += 20
+    ws.merge_cells(start_row=row, start_column=1, end_row=row + 3, end_column=7)
+    c = ws.cell(row, 1,
+        "Reading: dynamic_bias_stddev and dynamic_bias_correlation_time are still the inherited "
+        "x500 values, because 6.3 s of stationary data cannot support a 300 s correlation time. "
+        "The table shows that those inherited values make the simulated gyro bias wander by "
+        "roughly as much as the static bias measured from the aircraft, which is why the "
+        "published mean differed between two simulated runs of the same model. Until a long "
+        "stationary recording is available, the gyro <mean> values should be read as the best "
+        "estimate of the aircraft's bias at one moment, not as a figure the simulation will "
+        "reproduce on any given run.")
+    c.alignment = Alignment(wrap_text=True, vertical="top")
+    c.fill = FILL_SUB
     return ws
 
 
@@ -480,6 +720,9 @@ def main(argv=None):
                          "report compares against whatever was in the model when the "
                          "measurement ran, which after a first --emit is the tool's own "
                          "output rather than the original values.")
+    ap.add_argument("--model-sdf", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "models/m4e/model.sdf",
+                    help="the model as it now stands, for the bias-model sheet")
     ap.add_argument("-o", "--out", type=Path,
                     default=Path("reports/dotFlySim2_imu_calibration.xlsx"))
     a = ap.parse_args(argv)
@@ -498,15 +741,29 @@ def main(argv=None):
                 st["stddev_current"] = b.get("stddev")
                 st["mean_current"] = b.get("mean")
 
+    model_now = {}
+    if a.model_sdf and a.model_sdf.exists():
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from imu_from_bag import read_model_noise
+        model_now = read_model_noise(a.model_sdf)
+
     wb = Workbook()
     wb.remove(wb.active)
     sheet_summary(wb, phys)
     sheet_verification(wb, phys, sim)
     sheet_method(wb, phys)
     sheet_stationary(wb, phys)
-    sheet_timeseries(wb, phys)
-    sheet_psd(wb, phys)
-    sheet_allan(wb, phys)
+    sheet_timeseries(wb, phys, "Aircraft samples",
+                     "Aircraft: raw samples of the stationary segment")
+    if sim is not None:
+        sheet_timeseries(wb, sim, "Simulation samples",
+                         "Simulation: raw samples of the stationary segment",
+                         chart_limit_s=phys["result"]["segment_len_s"])
+    sheet_sampling(wb, phys, sim)
+    sheet_psd(wb, phys, sim)
+    sheet_allan(wb, phys, sim)
+    if model_now:
+        sheet_bias_model(wb, phys, model_now)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(a.out)
     print(f"wrote {a.out}  ({len(wb.sheetnames)} sheets: {', '.join(wb.sheetnames)})")

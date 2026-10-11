@@ -312,7 +312,12 @@ ENU.
 
 ## 7. Services
 
-All 56 published services are served. The ones a mission actually needs:
+All 56 published services are defined; 42 are advertised by default. The 14
+camera-settings services (`camera_{set,get}_{aperture,iso,shutter_speed,
+exposure_mode_ev,focus_mode,focus_target,focus_ring_value}`) ship disabled
+because they store a value and change no pixel — a call gets `service not
+available` until they are enabled from walker's SERVICES screen. The ones a
+mission actually needs:
 
 | service | type | notes |
 |---|---|---|
@@ -326,6 +331,71 @@ All 56 published services are served. The ones a mission actually needs:
 | `start_perception` | `PerceptionStereoVisionSetup` | gates the stereo streams |
 | `camera_*` | various | 29 camera services: capture, optics, zoom, storage |
 | `set_*_obstacle_avoidance` | `SetObstacleAvoidance` | five directional pairs, not one switch |
+
+### Switching cameras from a mission
+
+Both camera systems are switched with the aircraft's own services, so this
+code is unchanged when it moves to hardware.
+
+```cpp
+// Perception: one direction at a time. FRONT, REAR, LEFT, RIGHT, DOWN.
+auto perception = create_client<psdk_interfaces::srv::PerceptionStereoVisionSetup>(
+    "/wrapper/psdk_ros2/start_perception");
+
+auto req = std::make_shared<
+    psdk_interfaces::srv::PerceptionStereoVisionSetup::Request>();
+req->stereo_cameras_direction = "DOWN";
+req->start_stop = true;
+// Check BOTH: the call can succeed at the transport level and still refuse.
+auto future = perception->async_send_request(req);
+// ... wait ...
+if (!future.get()->success) {
+  RCLCPP_WARN(get_logger(), "perception: %s", future.get()->message.c_str());
+}
+```
+
+The refusal messages are worth reading rather than discarding, because they
+distinguish three different situations:
+
+| message | what it means |
+|---|---|
+| `UP is not available: the M4E has no upward stereo pair` | the aircraft cannot do this, ever |
+| `... nothing is rendering /drone/perception/dl/image_raw ...` | this *simulation session* did not enable that direction; a hardware-only problem it will not have |
+| `unknown direction 'FORWARD'` | the string is wrong — it is `FRONT` |
+
+The second one has no counterpart on hardware. Enable the direction on
+walker's camera screen before starting the simulation (`README.md` §6).
+
+```cpp
+// Payload: index 1 is the gimbal camera, 7 the FPV camera.
+//   camera_source 0 DEFAULT / 1 M4E_VIS -> FHD, 3 M4E_4K -> 4K
+auto stream = create_client<psdk_interfaces::srv::CameraSetupStreaming>(
+    "/wrapper/psdk_ros2/camera_setup_streaming");
+auto s = std::make_shared<psdk_interfaces::srv::CameraSetupStreaming::Request>();
+s->payload_index  = 1;
+s->camera_source  = 0;
+s->start_stop     = true;
+s->decoded_output = true;   // false is refused: there is no H.264 encoder here
+```
+
+**Three things will bite a mission that assumes otherwise.**
+
+`main_camera_stream` **changes size while it runs.** Switching lens or source
+changes the frame geometry mid-stream, as it does on the aircraft. If you
+cache `width`, `height` or intrinsics from the first frame, your mission works
+until the operator changes mode and then quietly processes the wrong geometry.
+Read them from every frame, or subscribe to the size you asked for and assert
+it.
+
+**The payload lens follows zoom, not a lens service.** `< 3x` is wide, `3–7x`
+medium tele, `> 7x` tele — call `camera_set_optical_zoom`. There is no
+service that names a lens directly; one used to exist in this simulation and
+was removed precisely because the aircraft has no such thing.
+
+**`perception_stereo_{left,right}_stream` are fixed names whose content
+changes.** Switching direction does not give you new topics. If your node
+holds per-direction state, reset it when you switch, because the next frame on
+the same topic is looking somewhere else.
 
 Every served service has **ROS 2 service introspection on**, so a call is
 recorded through its `<service>/_service_event` topic. Without that, a

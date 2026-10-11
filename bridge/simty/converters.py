@@ -1379,6 +1379,104 @@ def image_passthrough(msg, ctx: ConversionContext):
     return msg
 
 
+# psdk_ros2 derives main_camera_stream's frame_id from the selected camera
+# source, through a std::map in psdk_wrapper_utils.hpp. That map's keys
+# COLLIDE: the enum reuses small integers across aircraft, so H20_WIDE,
+# M30_ZOOM, M3E_VIS and M4E_VIS are all 1, and in a std::map built from an
+# initializer list the first entry for a key wins. The surviving names are
+# therefore an H20's, whatever aircraft is actually flying:
+#
+#     0 -> default_optical_link     1 -> h20_wide_optical_link
+#     2 -> h20_zoom_optical_link    3 -> h20t_ir_optical_link
+#
+# bag_000026 confirms the 0 case on a real M4E: every main_camera_stream frame
+# in it carries default_optical_link, across five changes of image size.
+#
+# WE REPRODUCE THIS, INCLUDING THE WRONG NAMES, because the point of the
+# wrapper surface is that code behaves the same here and on the aircraft. A
+# consumer keying off frame_id must see what it will really see. Set
+# main_camera_true_frame_id to emit M4E names instead, for a rig that has no
+# hardware to match.
+_PSDK_SOURCE_FRAME = {
+    0: "default_optical_link",
+    1: "h20_wide_optical_link",
+    2: "h20_zoom_optical_link",
+    3: "h20t_ir_optical_link",
+}
+_M4E_TRUE_FRAME = {0: "default_optical_link", 1: "m4e_vis_optical_link",
+                   3: "m4e_4k_optical_link"}
+
+
+def stereo_mono_image(msg, ctx: ConversionContext):
+    """The perception pair, as mono8, which is what the aircraft publishes.
+
+    The sensors render RGB because gz-sensors' WideAngleCameraSensor supports
+    exactly one pixel format (RGB_INT8); asking it for L8 logs "Unsupported
+    pixel format [1]" and produces nothing. Rather than give up the fisheye
+    projection, the colour is thrown away here, so
+    perception_stereo_{left,right}_stream carries mono8 704x704 at 20 Hz as it
+    does on hardware.
+
+    ITU-R BT.601 luma, the same weighting cv_bridge and OpenCV use for
+    RGB2GRAY, so a consumer that greyscales the aircraft's frames itself gets
+    the same numbers either way.
+
+    Passes anything already mono through untouched: if gz ever grows L8
+    support for this sensor, the model can go back to it and this converter
+    stops doing work without anyone editing it.
+    """
+    out = image_passthrough(msg, ctx)
+    if out is None:
+        return None
+    encoding = str(_g(out, "encoding", "") or "")
+    if encoding in ("mono8", "8UC1"):
+        return out
+    if encoding not in ("rgb8", "bgr8"):
+        ctx.warn("stereo_encoding", f"expected rgb8/bgr8, got {encoding!r}; "
+                                    "forwarding unconverted")
+        return out
+    try:
+        import numpy as np
+        h, w = int(_g(out, "height", 0)), int(_g(out, "width", 0))
+        rgb = np.frombuffer(bytes(out.data), dtype=np.uint8).reshape(h, w, 3)
+        if encoding == "bgr8":
+            rgb = rgb[:, :, ::-1]
+        luma = (rgb[:, :, 0] * 0.299 + rgb[:, :, 1] * 0.587
+                + rgb[:, :, 2] * 0.114).astype(np.uint8)
+        out.data = luma.tobytes()
+        out.encoding = "mono8"
+        out.step = w
+    except Exception as exc:                        # noqa: BLE001
+        ctx.warn("stereo_mono_failed", f"{exc}; forwarding colour")
+    return out
+
+
+def main_camera_image(msg, ctx: ConversionContext):
+    """image_passthrough, plus the frame_id psdk_ros2 would have stamped."""
+    out = image_passthrough(msg, ctx)
+    if out is None:
+        return None
+    source = int(ctx.shared.get("camera_source", 0) or 0)
+    table = (_M4E_TRUE_FRAME if bool(ctx.p("main_camera_true_frame_id", False))
+             else _PSDK_SOURCE_FRAME)
+    try:
+        out.header.frame_id = table.get(source, table[0])
+    except Exception:
+        ctx.warn("image_frame_id", f"could not stamp frame_id for source {source}")
+    return out
+
+
+def fpv_camera_image(msg, ctx: ConversionContext):
+    """The FPV feed. psdk_ros2 hard-codes this frame_id; so do we."""
+    out = image_passthrough(msg, ctx)
+    if out is not None:
+        try:
+            out.header.frame_id = "fpv_camera_link"
+        except Exception:
+            pass
+    return out
+
+
 # ── SIM -> HOST: the rest of the wrapper's telemetry surface ─────────────────
 
 

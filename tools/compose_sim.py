@@ -157,6 +157,14 @@ def sensor_topics(text: str) -> dict[str, tuple[str, str]]:
     return out
 
 
+# gz calls a fisheye sensor "wideanglecamera" and a rectilinear one "camera".
+# Everything in this file that cares about cameras -- making them lazy, giving
+# them a camera_info row -- means both. Keeping the bare string comparison
+# meant the m4e's six fisheyes silently stayed always_on when they changed
+# type, which is 60 MP/s of rendering nobody asked for.
+CAMERA_TYPES = ("camera", "wideanglecamera")
+
+
 def relax_cameras(text: str) -> tuple[str, list[str]]:
     """
     Set <always_on>false</always_on> on every CAMERA sensor. See note 1 above.
@@ -167,7 +175,7 @@ def relax_cameras(text: str) -> tuple[str, list[str]]:
     pieces, touched, last = [], [], 0
     for s, e, name, typ in sensor_blocks(text):
         block = text[s:e]
-        if typ == "camera" and "<always_on>true</always_on>" in block:
+        if typ in CAMERA_TYPES and "<always_on>true</always_on>" in block:
             block = block.replace("<always_on>true</always_on>",
                                   "<always_on>false</always_on>", 1)
             touched.append(name)
@@ -349,6 +357,12 @@ def write_server_config(out: str, qgc_video: bool) -> tuple[str, bool]:
 _IMG = ("sensor_msgs/msg/Image", "gz.msgs.Image")
 _TYPES = {
     "camera": _IMG,
+    # A fisheye is a different SDF sensor type and the same ROS message. Its
+    # absence here is what made the m4e's six perception lenses vanish from
+    # the generated bridge config: sensor_topics found them, relax_cameras
+    # made them lazy, and then this table silently dropped them, so the ROS
+    # topics never existed and start_perception refused every direction.
+    "wideanglecamera": _IMG,
     "gpu_lidar": ("sensor_msgs/msg/LaserScan", "gz.msgs.LaserScan"),
     "boundingbox_camera": _IMG,
 }
@@ -395,7 +409,7 @@ def write_bridge_yaml(out: str, topics: dict[str, tuple[str, str]]) -> tuple[str
             rows.append("  lazy: true")
         rows.append("")
         n += 1
-        if typ == "camera":
+        if typ in CAMERA_TYPES:
             rows += [
                 f'- ros_topic_name: "{topic.rsplit("/", 1)[0]}/camera_info"',
                 f'  gz_topic_name: "{topic}/camera_info"',

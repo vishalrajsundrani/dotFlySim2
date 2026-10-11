@@ -793,8 +793,18 @@ class Daemon:
         if op == "cameras":
             return self.op_cameras(req.get("args", {}) or {})
         if op == "camera_list":
+            drone = self.selection.get("drone", "")
+            dirs = camreg.directions(drone, self.enabled_cameras)
+            # Which direction is STREAMING is a different question from which
+            # lenses are rendering: walker chooses the second, start_perception
+            # the first. Read off the graph rather than remembered, so a bridge
+            # restart cannot leave this confidently wrong.
+            live = self.watch.perception_active(
+                {d["direction"]: d["topics"] for d in dirs})
             return {"ok": True,
-                    "cameras": camreg.catalogue(self.selection.get("drone", "")),
+                    "cameras": camreg.catalogue(drone),
+                    "directions": dirs,
+                    "live_direction": live,
                     "enabled": sorted(self.enabled_cameras),
                     "active": self.selection.get("active_lens", "")}
         if op == "bags":

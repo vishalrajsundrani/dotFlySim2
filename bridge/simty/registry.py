@@ -25,6 +25,7 @@ _px4() and a row whose type is missing is reported as unavailable instead of
 crashing the process at import.
 """
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, List, Tuple
@@ -687,6 +688,10 @@ def build_topic_routes(settings) -> List[TopicRoute]:
 #
 # A topic absent from this table runs uncapped.
 PDF_RATE_HZ = {
+    # main_camera_stream is MEASURED, not from the PDF: 23.5 Hz mean over
+    # bag_000026's 3898 frames. The PDF says 11. Video routes carry their own
+    # cap and do not read this table, but leaving a wrong number here would
+    # have the surface report disagree with the bridge.
     "attitude": 50.0, "imu": 50.0, "position_fused": 50.0,
     "velocity_ground_fused": 50.0, "angular_rate_body_raw": 50.0,
     "angular_rate_ground_fused": 50.0, "visual_odometry": 50.0,
@@ -704,7 +709,7 @@ PDF_RATE_HZ = {
     "rtk_connection_status": 5.0, "rtk_position": 5.0,
     "rtk_position_info": 5.0, "rtk_velocity": 5.0, "rtk_yaw": 5.0,
     "rtk_yaw_info": 5.0,
-    "main_camera_stream": 11.0,
+    "main_camera_stream": 23.5,
     "perception_stereo_left_stream": 18.0,
     "perception_stereo_right_stream": 19.0,
 }
@@ -883,11 +888,23 @@ def _video_routes(host, sim, Image) -> List[TopicRoute]:
             sim_topic=sim["camera_active"],
             sim_type=Image,
             direction=Direction.SIM_TO_HOST,
-            converter=cv.image_passthrough,
+            converter=cv.main_camera_image,
             group="video",
             sub_qos="compat",
             pub_qos="video",
-            max_hz=5.0,
+            # THE AIRCRAFT'S MEASURED RATE, not a guess and not the PDF's.
+            # Three numbers were in play and only one came from the aircraft:
+            # this route used to cap at 5 Hz, PDF_RATE_HZ says 11, and
+            # bag_000026 delivers 23.5 Hz mean over 3898 frames (28.6 Hz
+            # median; the mean is dragged down by nine recorder stalls). A
+            # simulation 4.7x slower than the aircraft is not a conservative
+            # choice -- a perception pipeline tuned against it is tuned against
+            # a frame budget it will not get. The cost is real: 1920x1080 RGB
+            # at 23.5 Hz is ~146 MB/s, which is fine over shared memory inside
+            # the container and is NOT fine over a link. Lower it on walker's
+            # camera screen if a session needs to, and know that lowering it is
+            # a divergence from the aircraft.
+            max_hz=23.5,
             enabled=False,
             notes="OFF: simulated active lens out as main_camera_stream. "
                   "Collides with a live wrapper, which publishes this name too",
@@ -914,7 +931,7 @@ def _video_routes(host, sim, Image) -> List[TopicRoute]:
             sim_topic=sim["camera_preview"],
             sim_type=Image,
             direction=Direction.SIM_TO_HOST,
-            converter=cv.image_passthrough,
+            converter=cv.fpv_camera_image,
             group="video",
             sub_qos="compat",
             pub_qos="video",
@@ -966,10 +983,10 @@ def _video_routes(host, sim, Image) -> List[TopicRoute]:
             key="stereo_left_out",
             host_topic=host("perception_stereo_left_stream"),
             host_type=Image,
-            sim_topic="/drone/perception/front/left/image_raw",
+            sim_topic="/drone/perception/fl/image_raw",
             sim_type=Image,
             direction=Direction.SIM_TO_HOST,
-            converter=cv.image_passthrough,
+            converter=cv.stereo_mono_image,
             group="video",
             sub_qos="compat",
             pub_qos="video",
@@ -978,22 +995,24 @@ def _video_routes(host, sim, Image) -> List[TopicRoute]:
             # matcher, and mono8 704x704 is an eighth of a 1080p RGB frame.
             max_hz=20.0,
             enabled=False,
-            notes="OFF until start_perception FRONT; mono8 704x704 @20 Hz",
+            notes="OFF until start_perception; sim_topic is REPOINTED per "
+                  "direction by _h_start_perception; mono8 704x704 @20 Hz",
         ),
         TopicRoute(
             key="stereo_right_out",
             host_topic=host("perception_stereo_right_stream"),
             host_type=Image,
-            sim_topic="/drone/perception/front/right/image_raw",
+            sim_topic="/drone/perception/fr/image_raw",
             sim_type=Image,
             direction=Direction.SIM_TO_HOST,
-            converter=cv.image_passthrough,
+            converter=cv.stereo_mono_image,
             group="video",
             sub_qos="compat",
             pub_qos="video",
             max_hz=20.0,
             enabled=False,
-            notes="OFF until start_perception FRONT; mono8 704x704 @20 Hz",
+            notes="OFF until start_perception; sim_topic is REPOINTED per "
+                  "direction by _h_start_perception; mono8 704x704 @20 Hz",
         ),
     ]
 
@@ -1538,17 +1557,6 @@ def _h_camera_record(request, response, bridge):
     return _ok(response)
 
 
-def _h_camera_stream_source(request, response, bridge):
-    from std_msgs.msg import String
-
-    # E_DjiCameraManagerStreamSource: 1 = WIDE, 2 = ZOOM.
-    source = int(getattr(request, "stream_source", 1))
-    lens = "wide" if source == 1 else "tele"
-    bridge.publish_sim("/drone/camera/select", String(data=lens), String)
-    bridge.shared["stream_source"] = lens
-    return _ok(response)
-
-
 def _h_camera_get_type(request, response, bridge):
     response = _ok(response)
     if hasattr(response, "camera_type"):
@@ -1681,21 +1689,105 @@ def _h_camera_get_file_list(request, response, bridge):
                  f"{int(bridge.shared.get('photo_count', 0))} photo(s) were counted only")
 
 
+# dji_liveview.h: the only two positions psdk_ros2 publishes for, and the
+# wrapper route each one lands on.
+_LIVEVIEW_POSITION = {1: "main_camera_out", 7: "fpv_camera_out"}
+
+# dji_liveview.h, the M4E's entries plus the generic default. These integers
+# are reused across aircraft -- 1 is M4E_VIS here and H20_WIDE on an H20 -- so
+# they are only meaningful alongside camera_get_type.
+# NAME -> WIRE VALUE. Membership tests go against .values(): a request carries
+# the integer, not the name, and testing `source in _M4E_SOURCES` silently
+# compares an int against the string keys and rejects everything.
+_M4E_SOURCES = {"DEFAULT": 0, "M4E_VIS": 1, "M4E_4K": 3}
+
+
 def _h_camera_setup_streaming(request, response, bridge):
     """
-    Start or stop the main camera feed, the way psdk_ros2 does it.
+    Start or stop a camera feed, honouring all four request fields.
 
-    This is the one camera service with a real effect: it decides whether the
-    simulated lens reaches the wrapper's main_camera_stream, by turning the
-    route that carries it on or off.
+    This is the service that chooses WHICH camera reaches the wrapper, and the
+    previous version ignored three quarters of it: it toggled the main feed
+    whatever payload_index said, stored camera_source without acting on it,
+    and never looked at decoded_output.
+
+    payload_index SELECTS THE TOPIC, not merely a bay. In psdk_ros2's
+    liveview.cpp only two positions are handled: NO_1 publishes on
+    main_camera_stream, FPV on fpv_camera_stream. Positions 2 and 3 fall
+    through a chain that leaves `streaming_result` uninitialised and then
+    reads it, so upstream returns an arbitrary answer and streams nothing. We
+    refuse them instead. Imitating undefined behaviour is not fidelity.
+
+    camera_source SELECTS THE STREAM. The values are per aircraft and are
+    reused across models (H20_WIDE, M30_ZOOM and M3E_VIS are all 1), so a
+    value only means something once you know what is mounted. For an M4E,
+    dji_liveview.h defines:
+
+        DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT = 0
+        DJI_LIVEVIEW_CAMERA_SOURCE_M4E_VIS = 1
+        DJI_LIVEVIEW_CAMERA_SOURCE_M4E_4K  = 3
+
+    so those three are accepted and anything else is refused by name. The 4K
+    source really does change the stream: camera_switcher.py is told to switch
+    tier, so the published frames change size exactly as they do on the
+    aircraft. The recording bag_000026 shows the real main_camera_stream
+    changing between 1440x1080 and 1920x1080 five times in 184 s with no
+    change in frame_id, so a consumer that caches geometry from the first
+    frame is already wrong on hardware; it should be wrong here too.
+
+    decoded_output IS NOT IMPLEMENTED FOR ENCODED, AND SAYS SO. Upstream
+    publishes the H.264 bitstream inside a sensor_msgs/Image with
+    encoding="h264". There is no H.264 encoder in this simulation, so asking
+    for encoded output is refused with a message rather than silently served
+    as RGB, which would be a lie about the message's own encoding field.
     """
     start = bool(getattr(request, "start_stop", False))
     source = int(getattr(request, "camera_source", 0))
-    bridge.shared["camera_streaming"] = start
+    index = int(getattr(request, "payload_index", 1))
+    decoded = bool(getattr(request, "decoded_output", True))
+
+    def reply(ok_, message=""):
+        if hasattr(response, "success"):
+            response.success = ok_
+        if message:
+            bridge.state.log.add(INFO if ok_ else WARN, "camera", message)
+        return response
+
+    route_key = _LIVEVIEW_POSITION.get(index)
+    if route_key is None:
+        return reply(False,
+                     f"payload_index {index} is not a streaming position; the M4E "
+                     f"serves {_LIVEVIEW_POSITION[1]} at 1 (NO_1) and "
+                     f"{_LIVEVIEW_POSITION[7]} at 7 (FPV)")
+    if not start:
+        bridge.shared["camera_streaming"] = False
+        bridge.submit_slow(lambda b, name=route_key: b.set_route_enabled(name, False))
+        return reply(True, f"{route_key} stopped")
+
+    if source not in _M4E_SOURCES.values():
+        return reply(False,
+                     f"camera_source {source} is not one this aircraft offers; "
+                     f"the M4E has " + ", ".join(
+                         f"{v} ({k})" for k, v in _M4E_SOURCES.items()))
+    if not decoded:
+        return reply(False,
+                     "encoded output is not simulated: upstream would publish an "
+                     "H.264 bitstream in an Image with encoding='h264', and this "
+                     "simulation has no encoder. Ask for decoded_output=true.")
+
+    # The 4K source streams the 4K tier; VIS and DEFAULT stream FHD, which is
+    # what the aircraft was doing throughout bag_000026.
+    if route_key == "main_camera_out":
+        from std_msgs.msg import String
+        tier = "video_4k" if source == 3 else "video_fhd"
+        bridge.publish_sim("/drone/camera/mode", String(data=tier), String)
+        bridge.shared["camera_tier"] = tier
+
+    bridge.shared["camera_streaming"] = True
     bridge.shared["camera_source"] = source
-    for key in ("main_camera_out",):
-        bridge.submit_slow(lambda b, name=key, on=start: b.set_route_enabled(name, on))
-    return _ok(response, True)
+    bridge.shared["camera_position"] = index
+    bridge.submit_slow(lambda b, name=route_key: b.set_route_enabled(name, True))
+    return reply(True, f"{route_key} streaming, source {source}")
 
 
 def _h_camera_shoot_burst(request, response, bridge):
@@ -1807,11 +1899,60 @@ def _h_set_home_from_gps(request, response, bridge):
 # The directions the aircraft has hardware for, and the one it does not. The
 # M4E has no upward stereo pair, so PSDK fails an UP request -- worth refusing
 # here in the same way rather than accepting it and streaming nothing.
-_PERCEPTION_DIRECTIONS = ("FRONT", "REAR", "LEFT", "RIGHT", "DOWN")
-# ...and the subset this simulation actually renders. Adding another means two
-# sensors in models/m4e/model.sdf, two image rows plus two camera_info rows in
-# config/bridge.yaml, and a pair of routes below.
-_PERCEPTION_SIMULATED = ("FRONT",)
+# The directions PSDK offers. UP is here because the service accepts it; the
+# M4E has no upward pair, and the handler refuses it separately.
+_PERCEPTION_DIRECTIONS = ("FRONT", "REAR", "LEFT", "RIGHT", "DOWN", "UP")
+
+# WHICH SENSOR IS THE LEFT EYE OF WHICH DIRECTION IS NOT A CONSTANT HERE.
+#
+# It used to be: one tuple naming FRONT, because FRONT was the only pair the
+# model had. The model now carries six fisheyes shared between five
+# directions, so the mapping is real data -- and it is data the aircraft side
+# needs too, because perception_camera_parameters is never populated and a
+# consumer has to read a calibration file either way. So both sides read the
+# SAME file, config/perception_calib.yaml, generated from the model by
+# tools/gen_perception_calib.py.
+#
+# Deriving it also fixes a trap. For a rearward or sideways pair the sensor
+# whose NAME says "left" is not the left EYE: looking aft, the airframe's
+# rear-right corner is on your left. Inferring the mapping from names gives
+# negative disparity, which reads as bad data rather than as a swapped pair.
+_CALIB_CANDIDATES = (
+    os.environ.get("PERCEPTION_CALIB", ""),
+    os.path.expanduser("~/ws/config/perception_calib.yaml"),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "config", "perception_calib.yaml"),
+)
+
+_calib_cache: dict | None = None
+
+
+def perception_calib() -> dict:
+    """The direction -> (left sensor, right sensor) map, read once."""
+    global _calib_cache
+    if _calib_cache is not None:
+        return _calib_cache
+    for path in _CALIB_CANDIDATES:
+        if path and os.path.isfile(path):
+            try:
+                import yaml
+                with open(path) as fh:
+                    _calib_cache = yaml.safe_load(fh) or {}
+                _calib_cache["_path"] = path
+                return _calib_cache
+            except Exception:
+                break
+    _calib_cache = {}
+    return _calib_cache
+
+
+def perception_pair(direction: str) -> tuple[str, str] | None:
+    """Sim topics for (left stream, right stream) of a direction, or None."""
+    d = (perception_calib().get("directions") or {}).get(direction)
+    if not d:
+        return None
+    return (f"/drone/perception/{d['left'].replace('perception_', '')}/image_raw",
+            f"/drone/perception/{d['right'].replace('perception_', '')}/image_raw")
 
 
 def _h_start_perception(request, response, bridge):
@@ -1828,6 +1969,18 @@ def _h_start_perception(request, response, bridge):
         refused explicitly, and says which it is. Returning success and then
         publishing nothing would be the one failure mode that looks like a bug
         in the caller.
+
+    HOW SWITCHING WORKS. There are two outbound routes, one per eye, and their
+    sim_topic is REPOINTED at the pair for the chosen direction before they are
+    enabled. The six fisheyes are shared between five directions, so a pair is
+    not a fixed thing: looking forward, fl and fr are the eyes; looking to
+    port, rl and fl are. The mapping comes from config/perception_calib.yaml
+    (see perception_pair) and never from the sensor names, because for a
+    rearward or sideways pair the sensor called "left" is not the left eye.
+
+    A route is torn down before it is repointed. _realise_route rebuilds
+    endpoints from the route's current fields, so changing sim_topic on a live
+    route would otherwise leave it subscribed to the previous direction.
 
     Note what is NOT here: perception_camera_parameters stays unpublished. The
     call behind it segfaults on a real M4E, so a consumer must read
@@ -1846,9 +1999,12 @@ def _h_start_perception(request, response, bridge):
         bridge.state.log.add(INFO if success else WARN, "perception", message)
         return response
 
-    if not start:
+    def stop_both():
         for key in ("stereo_left_out", "stereo_right_out"):
             bridge.submit_slow(lambda b, name=key: b.set_route_enabled(name, False))
+
+    if not start:
+        stop_both()
         bridge.shared["perception_direction"] = ""
         return reply(True, "perception stereo stopped")
 
@@ -1858,39 +2014,49 @@ def _h_start_perception(request, response, bridge):
         return reply(
             False,
             f"unknown direction {direction!r}; expected one of "
-            f"{', '.join(_PERCEPTION_DIRECTIONS)}",
-        )
-    if direction not in _PERCEPTION_SIMULATED:
-        return reply(
-            False,
-            f"{direction} is supported by the aircraft but not rendered in this "
-            f"simulation; only {', '.join(_PERCEPTION_SIMULATED)} is available",
+            f"{', '.join(d for d in _PERCEPTION_DIRECTIONS if d != 'UP')}",
         )
 
-    # THE SENSORS MAY NOT BE IN THE WORLD AT ALL. tools/compose_sim.py leaves
-    # the perception pair out when the simulation is started with
-    # --no-fisheye-cameras (or SIM_FISHEYE_CAMERAS=0), because rendering them
-    # costs ~20 megapixels/second that most sessions do not need. Enabling the
-    # routes anyway would report success and then publish nothing, which is the
-    # one failure mode that looks like a bug in the caller.
-    missing = [
-        route.sim_topic
-        for route in (bridge.route_by_key("stereo_left_out"),
-                      bridge.route_by_key("stereo_right_out"))
-        if route is not None and bridge.count_publishers(route.sim_topic) == 0
-    ]
+    pair = perception_pair(direction)
+    if pair is None:
+        calib = perception_calib()
+        where = calib.get("_path", "config/perception_calib.yaml")
+        known = ", ".join(sorted(calib.get("directions") or {})) or "none"
+        return reply(
+            False,
+            f"{direction} is not in the calibration ({where}); it knows {known}. "
+            f"Re-run tools/gen_perception_calib.py if the model has changed.",
+        )
+
+    # THE SENSORS MAY NOT BE IN THE WORLD AT ALL. Rendering six fisheyes is not
+    # free, so walker lets a session enable only the directions it needs, and
+    # tools/compose_sim.py can leave them out entirely. Enabling the routes
+    # anyway would report success and then publish nothing, which is the one
+    # failure mode that looks like a bug in the caller. Checked against the
+    # pair for THIS direction, not against a fixed pair, because a session may
+    # well have FRONT and not DOWN.
+    missing = [topic for topic in pair if bridge.count_publishers(topic) == 0]
     if missing:
         return reply(
             False,
-            "the perception cameras are not in this world (nothing publishes "
-            f"{', '.join(missing)}). Restart with fisheye cameras on: "
-            "./run.sh up  (or ./simulation.sh sim --no-cameras to go the other way)",
+            f"{direction} is supported by the aircraft but nothing is rendering "
+            f"{', '.join(missing)} in this session. Enable that direction on "
+            f"walker's camera screen before starting the simulation.",
         )
 
-    for key in ("stereo_left_out", "stereo_right_out"):
-        bridge.submit_slow(lambda b, name=key: b.set_route_enabled(name, True))
+    # Tear down first: a live route keeps its old subscription otherwise.
+    stop_both()
+    for key, topic in zip(("stereo_left_out", "stereo_right_out"), pair):
+        def repoint(b, name=key, src=topic):
+            route = b.route_by_key(name)
+            if route is not None:
+                route.sim_topic = src
+            b.set_route_enabled(name, True)
+        bridge.submit_slow(repoint)
     bridge.shared["perception_direction"] = direction
-    return reply(True, f"perception stereo streaming {direction}")
+    bridge.shared["perception_pair"] = list(pair)
+    return reply(True, f"perception stereo streaming {direction} "
+                       f"({pair[0].split('/')[3]} + {pair[1].split('/')[3]})")
 
 
 # OBSTACLE AVOIDANCE IS FIVE SWITCHES ON THE AIRCRAFT, NOT ONE.
@@ -2004,8 +2170,15 @@ def build_service_routes(settings) -> List[ServiceRoute]:
                      _psdk_srv("CameraShootSinglePhoto"), _h_camera_shoot_photo, group="camera"),
         ServiceRoute("camera_record", "camera_record_video",
                      _psdk_srv("CameraRecordVideo"), _h_camera_record, group="camera"),
-        ServiceRoute("camera_stream_source", "camera_set_stream_source",
-                     _psdk_srv("CameraSetStreamSource"), _h_camera_stream_source, group="camera"),
+        # camera_set_stream_source WAS HERE AND IS GONE. No such service exists
+        # in psdk_ros2: there is no CameraSetStreamSource.srv upstream, and no
+        # handler for it in the wrapper. It was this simulation's own
+        # invention, and a mission written against it would fail on the
+        # aircraft with "service not available" -- the exact failure this rig
+        # exists to prevent. The aircraft selects a lens through zoom
+        # (camera_set_optical_zoom, which camera_switcher.py follows at the 3x
+        # and 7x breakpoints) and selects a stream through camera_source on
+        # camera_setup_streaming. Both are served.
         ServiceRoute("camera_get_type", "camera_get_type",
                      _psdk_srv("CameraGetType"), _h_camera_get_type, group="camera"),
         ServiceRoute("camera_laser_ranging", "camera_get_laser_ranging_info",

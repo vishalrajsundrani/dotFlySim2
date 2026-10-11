@@ -115,13 +115,26 @@ track = "gimbal"        # walkerd starts the pose relay + stabiliser for this
 main_stream_default = "wide/videofhd"   # feeds /wrapper/psdk_ros2/main_camera_stream
 fpv_stream_default  = "wide/preview"    # feeds /wrapper/psdk_ros2/fpv_camera_stream
 
-# The obstacle-avoidance pair. ~20 MP/s for both — cheap, and the only thing
-# demo_gnss_stereo_inertial (M9) consumes.
+# The six obstacle-avoidance fisheyes: four at the corners, two underneath,
+# shared between five sensing directions. ~30 MP/s if all six render, but they
+# are lazy, so what a session actually costs is whichever directions are
+# enabled on walker's camera screen. One direction is ~10 MP/s.
+#
+# Which pair serves which direction, and which of a pair is the LEFT eye, is in
+# config/perception_calib.yaml, generated from the model. It is not inferable
+# from these names: for a rearward or sideways pair the airframe's "left" and
+# the stereo "left" are different cameras.
 [cameras.fisheye]
 model   = "m4e"
-sensors = ["perception_front_left", "perception_front_right"]
-topics  = ["/drone/perception/front/left/image_raw",
-           "/drone/perception/front/right/image_raw"]
+sensors = ["perception_fl", "perception_fr",
+           "perception_rl", "perception_rr",
+           "perception_dl", "perception_dr"]
+topics  = ["/drone/perception/fl/image_raw",
+           "/drone/perception/fr/image_raw",
+           "/drone/perception/rl/image_raw",
+           "/drone/perception/rr/image_raw",
+           "/drone/perception/dl/image_raw",
+           "/drone/perception/dr/image_raw"]
 
 # The three gimbal lenses, each in three tiers. ~1074 MP/s with all of them
 # rendering, which is why they are off by default on a laptop.

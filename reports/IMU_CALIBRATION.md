@@ -8,6 +8,14 @@ what the result is and is not worth.
 
 Everything here is reproducible from two commands, listed at the end.
 
+> **Current model supersedes the 250 Hz chain below.** `models/m4e/model.sdf`
+> now runs its IMU at **52 Hz** and carries the Allan-deviation model supplied
+> in `../imu_calib/imu_sensor.sdf.xml`. The 250 Hz references in sections 4 and 7
+> describe the earlier open-loop calibration and are kept as the record of how
+> those numbers were derived. The current stddev values are quoted at 52 Hz:
+> changing the rate requires rescaling them by `sqrt(new_rate / 52)`, not by
+> the 250 Hz figures in section 4.
+
 ---
 
 ## 1. The question, stated precisely

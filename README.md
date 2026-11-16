@@ -74,9 +74,13 @@ into the image, so nothing needs a rebuild.
 - 2 command topics (`..._generic`, `..._rollpitch_yawrate_thrust`) have no
   honest PX4 equivalent. A route that accepted them and did nothing would be
   worse than their absence.
-- The forward fisheye pair is 90°×90°, not the real 90°×135°: the published
-  stream is a square 704×704 image and matching that was judged more important
-  than matching the lens.
+- The forward fisheye pair uses the measured front-left/front-right lens
+  calibration: 704×704, equidistant, 114.7° in both axes. DJI quotes
+  90°×135° for the real lens, so the square stream is wider than the real
+  horizontal but narrower than the real vertical. Gazebo's
+  `wideanglecamera` has no intrinsics block: calibrating `fx` sets
+  `horizontal_fov`, and `fy`, `cx`, `cy` and distortion are carried in
+  `config/perception_calib.yaml`.
 - It is SITL on a laptop. Under a full load the simulation runs slower than
   real time — which is why missions count ticks, not seconds.
 

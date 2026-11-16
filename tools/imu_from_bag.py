@@ -788,14 +788,15 @@ def calibrate_against(result: dict, sim_json: Path) -> list[str]:
     """Close the loop: correct the model for what the whole chain does to it.
 
     What goes into models/m4e/model.sdf is not what comes out of
-    /wrapper/psdk_ros2/imu.  Gazebo generates noise at the sensor's 250 Hz,
-    PX4 filters it into SensorCombined, and the bridge publishes at the
-    aircraft's 50 Hz.  That last step is a decimation, and it is not
-    anti-aliased: noise occupying 125 Hz of bandwidth folds into 25 Hz, so the
-    density a consumer sees comes out close to sqrt(250/50) = 2.2x higher than
-    the figure written into the SDF.  Measured on a 147 s simulated recording
-    the factor is 1.85 to 1.94, uniform across all six axes -- mostly aliasing,
-    partly undone by PX4's own low-pass.
+    /wrapper/psdk_ros2/imu.  Gazebo generates noise at the sensor's configured
+    rate (52 Hz in the current M4E model), PX4 filters it into SensorCombined,
+    and the bridge publishes at the aircraft's 50 Hz.  That last step is a
+    decimation, and it is not anti-aliased: noise occupying the upper band
+    folds into 25 Hz, so the density a consumer sees comes out higher than the
+    figure written into the SDF.  Against the 250 Hz model this tool was first
+    calibrated on, theory put the ceiling at sqrt(250/50) = 2.2x; measured on
+    a 147 s simulated recording the factor was 1.85 to 1.94, uniform across all
+    six axes -- mostly aliasing, partly undone by PX4's own low-pass.
 
     Guessing that factor from theory would be fragile, since it depends on
     PX4's filter settings and the bridge's rate cap.  So it is measured: run
@@ -990,7 +991,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     current = read_model_noise(args.model) if args.model.exists() else {}
-    sim_rate = args.sim_rate or current.get("update_rate") or 250.0
+    sim_rate = args.sim_rate or current.get("update_rate") or 52.0
 
     # Reading the physical bag means pulling 15 GB off a USB stick and
     # decompressing every chunk, which is ~100 s.  The analysis gets iterated

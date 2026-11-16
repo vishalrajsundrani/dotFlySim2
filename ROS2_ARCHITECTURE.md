@@ -485,7 +485,7 @@ with `--shm-size=2g` and `doctor` checks the free space.
 | `gimbal_angles`, `gimbal_status`, `home_point_altitude`, `battery` | present | **absent** |
 | `flight_status` rate | ~2 Hz (PX4-limited) | ~25 Hz |
 | vision system | forward pair modelled + 5 more for testing | six fisheye lenses, omnidirectional |
-| fisheye vertical FOV | 90° (square image) | 135° |
+| fisheye FOV (horizontal × vertical) | 114.7° × 114.7° (square 704×704) | 90° × 135° |
 | time | simulated, slower than real under load | real |
 | a crash | a container restart | an aircraft |
 

@@ -133,8 +133,16 @@ without). Four at the corners yawed 45 degrees outward, two underneath.
 
 | | resolution | rate | hfov | f (equidistant) |
 | --- | --- | --- | --- | --- |
-| `perception_fl/fr/rl/rr` | 704x704 | 20 Hz | 190 deg | 212.3 px |
-| `perception_dl/dr` | 704x704 | 20 Hz | 160 deg | 252.1 px |
+| `perception_fl/rl/dl` | 704x704 | 20 Hz | 114.72 deg | 351.6 px |
+| `perception_fr/rr/dr` | 704x704 | 20 Hz | 114.65 deg | 351.8 px |
+
+The focal lengths are not invented: `simsupport/` carries OpenCV calibrations
+of the real front-left and front-right fisheyes at 704x704. The left
+calibration is applied to `fl`, `rl` and `dl`; the right calibration to `fr`,
+`rr` and `dr`. For an equidistant lens `f = width / hfov`, so each `fx` sets
+the SDF's `horizontal_fov`. Gazebo's `wideanglecamera` has no intrinsics block
+and cannot express a principal-point offset; `fy`, `cx`, `cy` and the
+calibrated distortion terms are published in `config/perception_calib.yaml`.
 
 Each costs 9.9 MP/s to render. All six is 59.5 MP/s, but the sharing means a
 session rarely needs all six: FRONT and REAR together are four lenses, and
@@ -147,11 +155,11 @@ worth more than the conversion, so `converters.stereo_mono_image` applies
 BT.601 luma on the way out and a consumer sees the mono8 the aircraft sends.
 
 **Which sensor is the left eye is data, not a naming convention.** It lives in
-`config/perception_calib.yaml`, generated from the model by
-`tools/gen_perception_calib.py`, together with intrinsics, distortion and
-`T_cam_imu` for each lens. Looking aft, the airframe's rear-right corner is on
-your left: inferring the pairing from names gives negative disparity, which
-reads as bad data rather than as a swapped pair.
+`config/perception_calib.yaml`, generated from the model and the `simsupport/`
+calibrations by `tools/gen_perception_calib.py`, together with intrinsics,
+distortion and `T_cam_imu` for each lens. Looking aft, the airframe's
+rear-right corner is on your left: inferring the pairing from names gives
+negative disparity, which reads as bad data rather than as a swapped pair.
 
 ### 3.3 The payload camera
 

@@ -3,6 +3,11 @@
 This file explains, in plain words, how we made the simulated drone's IMU
 behave like the IMU on the real aircraft. 
 
+> **Update.** The model now uses a 52 Hz IMU with the measured
+> Allan-deviation model from `../imu_calib/imu_sensor.sdf.xml`. The 250 Hz
+> figures below are from the earlier calibration and are kept as the
+> explanation of the method.
+
 ---
 
 ## What an IMU is, and what "calibrating" means here

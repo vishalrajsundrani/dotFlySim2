@@ -1,5 +1,11 @@
 # Cameras and the wrapper surface: aircraft vs simulation
 
+> **Status note.** This is a survey of the model as it stood when written. The
+> fisheye projection and front/rear field of view have since been updated in
+> `models/m4e/model.sdf` from the measured calibrations; see
+> `CAMERA_ARCHITECTURE.md` for the current state. The findings below are kept
+> as the record of what was wrong and why it mattered.
+
 Written for the visual-localisation work. The question was what actually
 differs between the simulation and the recording from the real aircraft, and
 what that means for modelling the payload and fisheye cameras.

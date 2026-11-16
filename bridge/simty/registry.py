@@ -1160,9 +1160,9 @@ def _extended_telemetry_routes(host, sim, types) -> List[TopicRoute]:
             pub_qos="reliable",
             # 50 Hz is the M4E's ceiling for this topic: psdk_params.yaml notes
             # that asking for 100 Hz fails the subscription with NONSUPPORT.
-            # SensorCombined itself runs at ~250 Hz (models/m4e/model.sdf), so
-            # the cap is what makes the simulated rate match the aircraft's
-            # rather than flattering it.
+            # SensorCombined itself runs at 52 Hz (models/m4e/model.sdf, the
+            # measured IMU rate), so the cap still tunes the bridge to the
+            # aircraft's rate rather than flattering it.
             max_hz=50.0,
             notes="50 Hz (the M4E's cap). FRD -> FLU, orientation spliced from "
                   "VehicleAttitude, covariances zero as on hardware",

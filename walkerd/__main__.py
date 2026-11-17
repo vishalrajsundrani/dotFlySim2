@@ -33,7 +33,8 @@ import projects                         # noqa: E402
 from mavguard import MavGuard           # noqa: E402
 from rosnode import RosWatcher          # noqa: E402
 from server import Server               # noqa: E402
-from units import (FAILED, LogRule, RUNNING, STARTING, Unit, UnitSpec)  # noqa: E402
+from units import (FAILED, LogRule, RUNNING, STARTING, STOPPED,  # noqa: E402
+                   Unit, UnitSpec)
 
 # project.conf spells the setpoint frame the way a mission author thinks about
 # it; the bridge names the same routes slightly differently.
@@ -132,6 +133,14 @@ class Daemon:
         # every lens is individually controllable and a profile is only a
         # shortcut for a particular set.
         self.enabled_cameras: set[str] = set()
+        # Every project instance ever started this run, in start order --
+        # "project#1", "project#2", ... Each lives as its own Unit in
+        # self.units, named by this id; this list is just the ordering and
+        # the pruning cursor. project_pkg maps an id to the package it is
+        # running, since the Unit itself only knows its argv.
+        self._project_seq = 0
+        self.project_order: list[str] = []
+        self.project_pkg: dict[str, str] = {}
         self._define_units()
 
     # ── the unit table ───────────────────────────────────────────────────────
@@ -178,28 +187,27 @@ class Daemon:
             ],
         ))
 
-        # The project unit's argv is rewritten each time one is started -- see
-        # op_start. It is declared here with a placeholder so the unit exists
-        # in the table (and on the dashboard) before anything has been chosen.
-        add(UnitSpec(
-            name="project",
-            argv=["/bin/true"],
-            cwd=projects.PROJECTS,
-            ready=None,          # a mission is "ready" as soon as it is running
-            stop_signal=signal.SIGINT,
-            stop_timeout=15.0,
-            description="one C++ mission, talking only to the wrapper surface",
-            log_rules=[
-                # A mission's step transitions are the whole story, and
-                # demo_orbit_mission's own logging convention is what these
-                # match: "[STEP 12s] status=... mode=... height=..."
-                LogRule(r"^\[[A-Z_]+ ", "info"),
-                LogRule(r"telemetry is flowing|reached|finished|landed|starting the circle",
-                        "info"),
-                LogRule(r"ok$|: ok", "info"),
-                LogRule(r"refused|not available|ERROR|could not|never switched", "warn"),
-            ],
-        ))
+        # PROJECT UNITS ARE NOT DECLARED HERE.
+        #
+        # Every other unit is a fixed slot: one sim, one bridge, one recorder.
+        # A project is not -- several C++ missions run at once, on the same
+        # sim and bridge, each one a ros2 node walkerd happens to supervise.
+        # So there is no static "project" entry in self.units; _op_start_project
+        # creates a fresh Unit, named "project#<n>", every time one is started,
+        # and it lives in self.units (and therefore on the dashboard, in logs,
+        # attach, everything else keyed by unit name) for exactly as long as
+        # that instance is interesting. See _op_start_project and
+        # _prune_projects.
+        self._project_log_rules = [
+            # A mission's step transitions are the whole story, and
+            # demo_orbit_mission's own logging convention is what these
+            # match: "[STEP 12s] status=... mode=... height=..."
+            LogRule(r"^\[[A-Z_]+ ", "info"),
+            LogRule(r"telemetry is flowing|reached|finished|landed|starting the circle",
+                    "info"),
+            LogRule(r"ok$|: ok", "info"),
+            LogRule(r"refused|not available|ERROR|could not|never switched", "warn"),
+        ]
 
         add(UnitSpec(
             name="cameras",
@@ -342,8 +350,26 @@ class Daemon:
                          if holder else
                          "QGC has full control again: nothing holds the flight lock")})
 
+    @staticmethod
+    def _category(unit_name: str) -> str:
+        """
+        The name constraints.py reasons about, for a unit on the table.
+
+        Every fixed unit is its own category. A project instance is not --
+        "project#7" is a category of one, which would make the constraint
+        table (one row per category) blind to it -- so every instance folds
+        back to the single category "project", the way the old singleton
+        unit used to BE that category.
+        """
+        return "project" if unit_name.startswith("project#") else unit_name
+
     def running(self) -> set[str]:
-        return {n for n, u in self.units.items() if u.state in (RUNNING, STARTING)}
+        return {self._category(n) for n, u in self.units.items()
+                if u.state in (RUNNING, STARTING)}
+
+    def running_projects(self) -> list[Unit]:
+        return [u for n, u in self.units.items()
+                if n.startswith("project#") and u.state in (RUNNING, STARTING)]
 
     def snapshot(self) -> dict:
         return {
@@ -363,6 +389,12 @@ class Daemon:
 
     def op_start(self, req: dict) -> dict:
         name = req.get("unit", "")
+
+        # Projects are not a slot in self.units -- see _define_units -- so
+        # they are not looked up there at all. Every other unit is.
+        if name == "project":
+            return self._op_start_project(req)
+
         unit = self.units.get(name)
         if unit is None:
             # Naming the unit alone reads as if the unit were the reason for a
@@ -387,33 +419,6 @@ class Daemon:
             if err:
                 return {"ok": False, "error": "replay", "reason": err}
 
-        if name == "project":
-            # PREPARING A PROJECT CAN TAKE MINUTES, so it does not happen
-            # inside the request. A stale mission is rebuilt first (57 s is
-            # typical), then the bridge is put into project mode, then the unit
-            # starts -- and a request that blocked for all of that would time
-            # out on the client, which is exactly what happened the first time.
-            #
-            # The reply says "accepted" and everything after it is reported the
-            # way every other unit transition is: as events. The unit goes
-            # STARTING -> RUNNING, or STARTING -> FAILED with the reason in its
-            # detail, and walker's dashboard shows either without waiting.
-            args = req.get("args", {}) or {}
-            unit = self.units["project"]
-
-            def prepare_and_start():
-                err = self._prepare_project(args)
-                if err:
-                    unit.mark(FAILED, err)
-                    return
-                unit.start()
-
-            unit.mark(STARTING, "building and starting — see its terminal")
-            threading.Thread(target=prepare_and_start, daemon=True,
-                             name="prepare-project").start()
-            return {"ok": True, "accepted": True,
-                    "advisories": list(verdict.advisories)}
-
         # The simulation is COMPOSED before it starts: which drone, which world
         # and which camera profile are decisions made on walker's screens, and
         # compose_sim.py turns them into the files PX4 and Gazebo will read.
@@ -428,6 +433,90 @@ class Daemon:
 
         unit.start()
         return {"ok": True, "advisories": list(verdict.advisories)}
+
+    def _new_project_id(self) -> str:
+        self._project_seq += 1
+        return f"project#{self._project_seq}"
+
+    def _prune_projects(self, keep_finished: int = 10) -> None:
+        """
+        Forget old, finished project instances once there are too many.
+
+        Every instance is kept around after it ends so its last log line and
+        exit code are still on the dashboard a minute later -- but kept
+        forever, a session that flies forty missions would grow self.units
+        without bound. Only STOPPED/FAILED ones are ever dropped; anything
+        still RUNNING or STARTING is never touched here.
+        """
+        finished = [iid for iid in self.project_order
+                    if self.units.get(iid) and
+                    self.units[iid].state in (STOPPED, FAILED)]
+        excess = len(finished) - keep_finished
+        for iid in finished[:max(0, excess)]:
+            self.units.pop(iid, None)
+            self.project_pkg.pop(iid, None)
+            self.project_order.remove(iid)
+
+    def _op_start_project(self, req: dict) -> dict:
+        """
+        Start ONE MORE project instance, alongside any already running.
+
+        Unlike every other unit, a project is not a slot: self.units gets a
+        brand new entry, "project#<n>", every time this is called, so two or
+        twenty missions can fly on the same sim and bridge at once. walkerd
+        enforces nothing between them -- see constraints.py -- they are
+        independent ros2 nodes and it is on the operator to not fly two that
+        fight over the same command topic.
+        """
+        verdict = constraints.check("project", self.running())
+        if not verdict.allowed:
+            return {"ok": False, "error": "refused", "reason": verdict.reason,
+                    "held_by": verdict.held_by, "hint": verdict.hint}
+
+        args = req.get("args", {}) or {}
+        package = (args.get("package") or "").strip()
+        if not package:
+            return {"ok": False, "error": "no project named"}
+
+        self._prune_projects()
+        inst_id = self._new_project_id()
+        unit = Unit(UnitSpec(
+            name=inst_id,
+            argv=["/bin/true"],          # rewritten below, once the build is known
+            cwd=projects.PROJECTS,
+            ready=None,                  # a mission is "ready" as soon as it runs
+            stop_signal=signal.SIGINT,
+            stop_timeout=15.0,
+            description=f"{package} — wrapper surface only",
+            log_rules=self._project_log_rules,
+        ), self.server.broadcast)
+        self.units[inst_id] = unit
+        self.project_pkg[inst_id] = package
+        self.project_order.append(inst_id)
+
+        # PREPARING A PROJECT CAN TAKE MINUTES, so it does not happen inside
+        # the request. A stale mission is rebuilt first (57 s is typical),
+        # then the unit starts -- and a request that blocked for all of that
+        # would time out on the client, which is exactly what happened the
+        # first time.
+        #
+        # The reply says "accepted" and everything after it is reported the
+        # way every other unit transition is: as events, against this
+        # instance's own id. The unit goes STARTING -> RUNNING, or
+        # STARTING -> FAILED with the reason in its detail, and walker's
+        # dashboard shows either without waiting.
+        def prepare_and_start():
+            err = self._prepare_project(unit, args)
+            if err:
+                unit.mark(FAILED, err)
+                return
+            unit.start()
+
+        unit.mark(STARTING, "building and starting — see its terminal")
+        threading.Thread(target=prepare_and_start, daemon=True,
+                         name=f"prepare-{inst_id}").start()
+        return {"ok": True, "accepted": True, "unit": inst_id,
+                "package": package, "advisories": list(verdict.advisories)}
 
     def _prepare_record(self, args: dict) -> str:
         """Point the recorder at a named bag. Returns "" or a reason."""
@@ -492,9 +581,9 @@ class Daemon:
                      f"surface")})
         return ""
 
-    def _prepare_project(self, args: dict) -> str:
+    def _prepare_project(self, unit: Unit, args: dict) -> str:
         """
-        Point the project unit at a mission, building it if need be.
+        Point this project INSTANCE's unit at a mission, building it if need be.
         Returns "" or an error meant for a human.
         """
         name = args.get("package", "")
@@ -534,12 +623,10 @@ class Daemon:
         else:
             needs_build = st["state"] in ("unbuilt", "missing")
 
-        unit = self.units["project"]
         unit.spec.argv = projects.run_argv(name, args.get("params"),
                                            build=needs_build,
                                            why=st.get("detail", ""))
         unit.spec.description = f"{name} — wrapper surface only"
-        self.selection["project"] = name
 
         # NO PROJECT MODE SWITCHING. The bridge is ready for missions the
         # moment it is up.
@@ -819,6 +906,23 @@ class Daemon:
             return {"ok": True, "problem": bagreg.valid_name(req.get("name", ""))}
         if op == "projects":
             return {"ok": True, "projects": projects.listing()}
+        if op == "projects_running":
+            # Every project INSTANCE walkerd is or was supervising this run,
+            # oldest first -- as opposed to "projects" above, which is the
+            # catalogue of packages under projects/ that could be started.
+            rows = []
+            for iid in self.project_order:
+                u = self.units.get(iid)
+                if u is None:
+                    continue
+                row = u.snapshot()
+                row["id"] = iid
+                row["package"] = self.project_pkg.get(iid, "?")
+                rows.append(row)
+            return {"ok": True, "projects": rows,
+                    "total_cpu_pct": round(sum(r["cpu_pct"] for r in rows), 1),
+                    "total_cpu_seconds": round(
+                        sum(r["cpu_seconds"] for r in rows), 1)}
         if op == "build":
             name = req.get("package", "")
             ok, out = projects.build(name)
@@ -919,6 +1023,18 @@ class Daemon:
                     # that the panel never repaints faster than a person reads.
                     if tick % 1 == 0:
                         self.watch.publish_panel_state(self.panel_state())
+                    # CPU is sampled at 1 Hz, not 5 -- a /proc walk of every
+                    # unit's whole process tree is cheap but not free, and
+                    # cost figures that move once a second are already far
+                    # steadier than anything a person is reading off them.
+                    # Re-broadcasting each unit as a "unit" event (not a new
+                    # event type) is what lets walker pick up the new numbers
+                    # with the same handler it already has for state changes.
+                    if tick % 5 == 0:
+                        for u in self.units.values():
+                            if u.pid is not None:
+                                u.sample_cpu()
+                                self.server.broadcast({"ev": "unit", **u.snapshot()})
                 except Exception:
                     pass
                 tick += 1

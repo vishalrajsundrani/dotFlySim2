@@ -38,7 +38,14 @@ STARTING = "starting"
 # nothing -- and so is `record`, whose one useful number (elapsed, size) is
 # already on the dashboard. A window per unit only helps while every window
 # earns its place.
-TERMINAL_UNITS = ("sim", "bridge", "project", "rviz", "qgc", "replay")
+#
+# A project is not one fixed unit any more -- see UNIT_KEYS below -- so it is
+# matched by prefix ("project#7" and counting) rather than listed here.
+TERMINAL_UNITS = ("sim", "bridge", "rviz", "qgc", "replay")
+
+
+def _is_terminal_unit(name: str) -> bool:
+    return name in TERMINAL_UNITS or name.startswith("project#")
 
 # Colour pairs, allocated once in main().
 C_OK, C_WARN, C_FAIL, C_DIM, C_HEAD, C_KEY = 1, 2, 3, 4, 5, 6
@@ -71,8 +78,11 @@ _CAMERA_TITLES = {
 }
 
 # unit -> the key that starts/stops it. Mirrors §7 so the help screen and the
-# dashboard cannot disagree.
-UNIT_KEYS = {"sim": "s", "bridge": "b", "project": "p", "qgc": "q",
+# dashboard cannot disagree. "project" is deliberately absent: it is not a
+# single slot any more, so 'p' launches another instance and 'm' manages the
+# ones already running -- both handled directly in key(), not through this
+# toggle table.
+UNIT_KEYS = {"sim": "s", "bridge": "b", "qgc": "q",
              "rviz": "v", "record": "r", "replay": "R"}
 
 
@@ -102,6 +112,13 @@ class App:
         self.prompt: dict | None = None
         # A bag's full detail, shown before replaying it.
         self.bag: dict | None = None
+        # The running-projects overlay: every project instance walkerd is or
+        # was supervising, with its own cpu/log/condition -- as opposed to
+        # `picker("project")`, which is the catalogue of packages you could
+        # launch another instance of.
+        self.proj_panel = False
+        self.proj_rows: list[dict] = []
+        self.proj_idx = 0
         # Units whose terminal window walker has already opened, so a unit that
         # flaps between states does not spawn a window every time.
         self.opened: set[str] = set()
@@ -128,7 +145,7 @@ class App:
                 # simulation, whose most interesting output -- Gazebo loading
                 # the world, PX4 booting, which airframe it chose -- all happens
                 # before it is ready.
-                if (state in (STARTING, RUNNING) and name in TERMINAL_UNITS
+                if (state in (STARTING, RUNNING) and _is_terminal_unit(name)
                         and name not in self.opened):
                     self.opened.add(name)
                     threading.Thread(target=self.open_terminal, args=(name,),
@@ -356,7 +373,9 @@ class App:
                            "missing": "missing"}.get(state, state),
                     detail=r.get("wants", "") or r.get("detail", ""),
                     error="" if state in ("built", "stale", "unbuilt") else r.get("detail", "")))
-            current = self.selection.get("project", "")
+            # No single "current" project any more -- any number may run at
+            # once, so there is nothing for the `•` marker to point at.
+            current = ""
         elif kind == "bag":
             try:
                 rows = self.c.call("bags").get("bags", [])
@@ -626,12 +645,10 @@ class App:
             if field == "project":
                 r = self.c.start("project", package=entry.name, rebuild=rebuild)
                 if r.get("ok"):
-                    with self._lock:
-                        self.selection["project"] = entry.name
-                    self.say(f"{entry.name}: "
+                    self.say(f"{r.get('unit','?')} ({entry.name}): "
                              + ("rebuilding, then flying" if rebuild
-                                else "reusing the existing build" ) 
-                             + " — watch its terminal", 8)
+                                else "reusing the existing build" )
+                             + " — watch its terminal, or press m to manage it", 8)
                     for a in r.get("advisories", []):
                         self.say(a, 10)
                 else:
@@ -841,6 +858,106 @@ class App:
                              f"[{r.get('hint','')}]", 12)
             self.bg("replay", go)
 
+    # ── running projects ─────────────────────────────────────────────────────
+
+    def open_running_projects(self) -> None:
+        """
+        (Re)load the running-projects overlay from walkerd.
+
+        Unlike every other picker, this one is refreshed on a timer while it
+        is open (see run()) rather than only when opened -- cpu% and uptime
+        are the whole point of the screen, and a snapshot that only ever
+        updates on a keypress would be lying about both within a second.
+        """
+        def go():
+            try:
+                r = self.c.projects_running()
+            except WalkerdError as e:
+                self.say(str(e).splitlines()[0]); return
+            rows = r.get("projects", [])
+            with self._lock:
+                self.proj_rows = rows
+                self.proj_idx = max(0, min(self.proj_idx, len(rows) - 1))
+                self.proj_panel = True
+        self.bg("projects_running", go)
+
+    def draw_projects(self) -> None:
+        s = self.scr
+        h, w = s.getmaxyx()
+        self.put(0, 0, " Running projects — every instance this session "
+                       "has started ".ljust(w),
+                 curses.color_pair(C_HEAD) | curses.A_BOLD)
+
+        top = 2
+        self.put(top - 1, 1,
+                 "   id          package              state      uptime     "
+                 "cpu%    cpu-s    detail",
+                 curses.color_pair(C_DIM))
+        rows = self.proj_rows
+        room = h - top - 3
+        first = (max(0, min(self.proj_idx - room // 2, len(rows) - room))
+                 if len(rows) > room else 0)
+        for i in range(first, min(len(rows), first + room)):
+            r = rows[i]
+            y = top + (i - first)
+            sel = (i == self.proj_idx)
+            attr = curses.A_REVERSE if sel else 0
+            state = r.get("state", "?")
+            colour = curses.color_pair(STATE_COLOUR.get(state, C_DIM))
+            cpu = r.get("cpu_pct", 0.0)
+            self.put(y, 1, "›" if sel else " ", curses.color_pair(C_KEY) | curses.A_BOLD)
+            self.put(y, 3, r.get("id", "")[:11].ljust(12), attr | curses.A_BOLD)
+            self.put(y, 15, r.get("package", "")[:20].ljust(21), attr)
+            self.put(y, 37, STATE_MARK.get(state, "○") + " " + state.ljust(9), colour)
+            self.put(y, 49, (f"{r.get('uptime', 0):>5.0f}s"
+                             if r.get("uptime") else ""), curses.color_pair(C_DIM))
+            self.put(y, 60, f"{cpu:>5.1f}",
+                     curses.color_pair(C_WARN if cpu > 80 else 0) | curses.A_BOLD)
+            self.put(y, 69, f"{r.get('cpu_seconds', 0):>7.0f}", curses.color_pair(C_DIM))
+            detail = r.get("detail", "")
+            if detail:
+                self.put(y, 78, detail[:max(0, w - 80)],
+                         curses.color_pair(C_FAIL if state == "failed" else C_DIM))
+
+        total_pct = sum(r.get("cpu_pct", 0.0) for r in rows)
+        running = sum(1 for r in rows if r.get("state") in ("running", "starting"))
+        self.put(h - 3, 2,
+                 f"{running} running of {len(rows)} tracked   ·   "
+                 f"total cpu: {total_pct:.1f}%",
+                 curses.color_pair(C_DIM) | curses.A_BOLD)
+        if self.status and time.time() < self.status_until:
+            self.put(h - 2, 2, self.status, curses.color_pair(C_WARN))
+        bar = (" [↑↓/jk] move   [enter] stop   [t] terminal   [F5] refresh   "
+               "[esc] back ")
+        self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
+        s.noutrefresh()
+
+    def projects_key(self, k: str, ch: int) -> None:
+        rows = self.proj_rows
+        n = len(rows)
+        if ch in (curses.KEY_UP,) or k == "k":
+            if n:
+                self.proj_idx = (self.proj_idx - 1) % n
+        elif ch in (curses.KEY_DOWN,) or k == "j":
+            if n:
+                self.proj_idx = (self.proj_idx + 1) % n
+        elif ch in (curses.KEY_ENTER, 10, 13):
+            if not n:
+                return
+            row = rows[self.proj_idx]
+            iid, state = row.get("id", ""), row.get("state")
+            if state not in ("running", "starting"):
+                self.say(f"{iid} is already {state}", 5)
+                return
+            self.bg(iid, lambda: (self.c.stop(iid),
+                                  self.say(f"stopping {iid}", 6)))
+        elif k == "t" and n:
+            self.open_terminal(rows[self.proj_idx].get("id", ""))
+        elif ch == curses.KEY_F5 or k == "5":
+            self.open_running_projects()
+        elif k in ("\x1b", "q"):
+            self.proj_panel = False
+
     # ── drawing ──────────────────────────────────────────────────────────────
 
     def _signature(self) -> tuple:
@@ -866,13 +983,18 @@ class App:
             return ("confirm", self.confirm["text"], status)
         if self.bag is not None:
             return ("bag", self.bag.get("name"), status)
+        if self.proj_panel:
+            rows = tuple((r.get("id"), r.get("state"), round(r.get("cpu_pct", 0), 1),
+                          int(r.get("uptime", 0))) for r in self.proj_rows)
+            return ("projects", rows, self.proj_idx, status)
         if self.picker is not None:
             pk = self.picker
             return ("picker", pk["kind"], pk["idx"], len(pk["items"]),
                     tuple(sorted(self.cam_enabled)), status)
         with self._lock:
             units = tuple((u["name"], u["state"], int(u.get("uptime", 0)),
-                           u.get("detail", "")) for u in self.units.values())
+                           u.get("detail", ""), round(u.get("cpu_pct", 0), 1))
+                          for u in self.units.values())
             links = tuple((l["name"], l["detail"]) for l in self.links)
             sel = tuple(sorted((k, str(v)) for k, v in self.selection.items()))
             edit = tuple(sorted(self.editable.items()))
@@ -893,6 +1015,8 @@ class App:
             self.draw_prompt()
         elif self.bag is not None:
             self.draw_bag()
+        elif self.proj_panel:
+            self.draw_projects()
         elif self.confirm is not None:
             # Drawn over the dashboard rather than instead of it, so the state
             # you are deciding about stays visible behind the question.
@@ -949,7 +1073,50 @@ class App:
 
         row += 1
         self.put(row, 2, "units", curses.color_pair(C_DIM)); row += 1
-        for name in ("sim", "bridge", "project", "qgc", "rviz", "record", "replay"):
+        for name in ("sim", "bridge"):
+            u = self.units.get(name)
+            state = u["state"] if u else "stopped"
+            known = u is not None
+            colour = curses.color_pair(STATE_COLOUR.get(state, C_DIM))
+            self.put(row, 4, STATE_MARK.get(state, "○"), colour)
+            self.put(row, 6, name.ljust(10),
+                     curses.A_BOLD if state == "running" else curses.A_NORMAL)
+            label = state if known else "not yet implemented"
+            self.put(row, 17, label.ljust(12)[:12],
+                     colour if known else curses.color_pair(C_DIM))
+            if name in self.busy:
+                self.put(row, 30, "working…", curses.color_pair(C_WARN))
+            elif u and u.get("uptime"):
+                self.put(row, 30, f"{u['uptime']:>5.0f}s", curses.color_pair(C_DIM))
+            detail = (u or {}).get("detail", "")
+            if detail:
+                self.put(row, 38, detail[:max(0, w - 52)],
+                         curses.color_pair(C_FAIL if state == "failed" else C_DIM))
+            if known:
+                self._key(row, w - 14, UNIT_KEYS.get(name, "?"),
+                          "stop" if state in ("running", "starting") else "start")
+            row += 1
+
+        # PROJECTS ARE NOT A SLOT. Any number may run at once (each its own
+        # "project#N" unit -- see walkerd/__main__.py), so there is no single
+        # state to show here. This row is a summary; `m` opens the full list
+        # with per-instance state, log and cpu.
+        proj = [u for n, u in self.units.items() if n.startswith("project#")]
+        running = [u for u in proj if u.get("state") in ("running", "starting")]
+        total_cpu = sum(u.get("cpu_pct", 0.0) for u in running)
+        colour = curses.color_pair(C_OK if running else C_DIM)
+        self.put(row, 4, "●" if running else "○", colour)
+        self.put(row, 6, "projects".ljust(10),
+                 curses.A_BOLD if running else curses.A_NORMAL)
+        self.put(row, 17, f"{len(running)} running".ljust(12), colour)
+        if proj:
+            self.put(row, 30,
+                     f"{total_cpu:>5.1f}% cpu  ({len(proj)} tracked)"[:max(0, w - 52)],
+                     curses.color_pair(C_DIM))
+        self._key(row, w - 14, "p", "launch")
+        row += 1
+
+        for name in ("qgc", "rviz", "record", "replay"):
             u = self.units.get(name)
             state = u["state"] if u else "stopped"
             known = u is not None
@@ -1006,8 +1173,8 @@ class App:
         # Status line, then the key bar.
         if self.status and time.time() < self.status_until:
             self.put(h - 2, 2, self.status, curses.color_pair(C_WARN))
-        bar = (" [s]im [b]ridge [p]roject [r]ec [R]eplay [c]ams [v]iz [q]gc "
-               "[t]erm [?]help [Q]uit ")
+        bar = (" [s]im [b]ridge [p]roject [m]anage [r]ec [R]eplay [c]ams [v]iz "
+               "[q]gc [t]erm [?]help [Q]uit ")
         self.put(h - 1, 0, bar.ljust(w), curses.color_pair(C_HEAD))
         s.noutrefresh()
 
@@ -1060,6 +1227,9 @@ class App:
         if self.bag is not None:
             self.bag_key(k, ch)
             return
+        if self.proj_panel:
+            self.projects_key(k, ch)
+            return
         if self.confirm is not None:
             cf = self.confirm
             if k in [o[0] for o in cf["options"]]:
@@ -1091,11 +1261,12 @@ class App:
         elif k == "s":
             self.toggle_unit("sim")
         elif k == "p":
-            state = self.units.get("project", {}).get("state", "stopped")
-            if state in ("running", "starting"):
-                self.toggle_unit("project")          # stop the running mission
-            else:
-                self.open_picker("project")          # choose which one to fly
+            # Always opens the launch picker now: any number of projects may
+            # be running at once, so there is no single one for 'p' to stop.
+            # Stopping an instance happens from the manage screen (m).
+            self.open_picker("project")
+        elif k == "m":
+            self.open_running_projects()
         elif k == "r":
             state = self.units.get("record", {}).get("state", "stopped")
             if state in ("running", "starting"):
@@ -1123,7 +1294,8 @@ class App:
             self.open_terminal("sim")
         elif k == "?":
             self.say("keys: s sim · w world · d drone · c cameras · g window · "
-                     "F5 rescan · P probe · t terminal · Q quit", 10)
+                     "p launch project · m manage projects · "
+                     "F5 rescan · P probe · t terminal · Q quit", 12)
         elif k == "w":
             if not self._locked("world"):
                 self.open_picker("world")
@@ -1195,6 +1367,8 @@ class App:
             # has to be asked for, and a reconnect needs a full snapshot.
             if time.time() - last_refresh > 2.0:
                 self.refresh_state()
+                if self.proj_panel:
+                    self.open_running_projects()
                 last_refresh = time.time()
             # A keypress always repaints, so a keystroke never waits on the
             # signature noticing it.

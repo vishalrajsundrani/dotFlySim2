@@ -9,7 +9,10 @@ the README described an older set of them.
 
 THE RULES, AS THE PROJECT OWNER STATED THEM
 -------------------------------------------
-  * one C++ project at a time
+  * any number of C++ projects may run at once, on the same sim and bridge --
+    a project is just a ros2 node, and nothing here arbitrates between
+    several of them publishing to the aircraft. That is on the projects, not
+    on walkerd.
   * a replay locks out projects and other replays -- the bag is publishing the
     wrapper surface, and a project publishing setpoints into that same surface
     gives two writers on one topic with no way to tell whose message won
@@ -18,7 +21,11 @@ THE RULES, AS THE PROJECT OWNER STATED THEM
   * recording is never locked out: during a project, during a replay, during
     nothing at all. One recorder at a time is the only limit
   * QGC may run alongside anything, because the MAVLink guard makes it
-    read-only whenever something else holds the flight lock (decision D4)
+    read-only whenever a REPLAY holds the flight lock (decision D4). Projects
+    do not hold it: with several of them allowed at once, "whoever is running
+    owns command" stops meaning anything, so QGC stays a full participant
+    while projects run and conflicts between a project and QGC are the
+    operator's to manage, same as between two projects.
 """
 
 from __future__ import annotations
@@ -26,8 +33,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Units that, while running, hold the right to command the aircraft. walkerd
-# locks QGC's command traffic for as long as any of these is up.
-FLIGHT_LOCK_HOLDERS = ("project", "replay")
+# locks QGC's command traffic for as long as any of these is up. "project" is
+# deliberately absent -- see the module docstring.
+FLIGHT_LOCK_HOLDERS = ("replay",)
 
 
 @dataclass(frozen=True)
@@ -40,9 +48,6 @@ class Rule:
 
 
 RULES: tuple[Rule, ...] = (
-    Rule("project", "project",
-         "one C++ project at a time",
-         "stop the running project first (p)"),
     Rule("project", "replay",
          "a replay owns the wrapper surface; a project would be a second writer "
          "on the same command topics",
@@ -73,14 +78,12 @@ REQUIRES: dict[str, tuple[str, ...]] = {
 
 # Warnings, not refusals: allowed, but the operator should know.
 ADVISORIES: dict[tuple[str, str], str] = {
-    ("qgc", "project"):
-        "QGC is now an OBSERVER: the MAVLink guard is dropping its commands "
-        "while the project holds the flight lock",
+    ("project", "qgc"):
+        "QGC is open alongside this project; projects do not hold the flight "
+        "lock, so QGC stays a full participant -- avoid commanding both at once",
     ("qgc", "replay"):
         "QGC is now an OBSERVER: the MAVLink guard is dropping its commands "
         "while the replay holds the flight lock",
-    ("project", "qgc"):
-        "QGC is open; it has been switched to observer for this project",
     ("replay", "qgc"):
         "QGC is open; it has been switched to observer for this replay",
 }

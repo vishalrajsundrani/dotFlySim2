@@ -127,7 +127,7 @@ enable/disable, diagnostics) is driven off the row.
 | `altitude_sea_level`, `altitude_barometric` | `/fmu/out/vehicle_global_position` | 70 |
 | `gps_position_fused`, `rtk_position` | `/fmu/out/vehicle_global_position` | 30 / 5 |
 | `gps_position`, `gps_details`, `gps_signal_level`, `rtk_*_info` | `/fmu/out/vehicle_gps_position` | 25 / 5 |
-| `flight_status`, `display_mode`, `flight_anomaly`, `rc_connection_status`, `motor_start_error`, `landing_gear_status` | `/fmu/out/vehicle_status_v4` | 25 |
+| `flight_status`, `display_mode`, `flight_anomaly`, `rc_connection_status`, `motor_start_error`, `landing_gear_status` | `/fmu/out/vehicle_status_v5` | 25 |
 | `single_battery_index1/2`, `battery` | `/fmu/out/battery_status_v1` | 21 |
 | `home_point`, `home_point_status`, `home_point_altitude` | `/fmu/out/home_position_v2` | 25 |
 | `relative_obstacle_info` | `/drone/lrf/range` | 25 |
@@ -154,7 +154,7 @@ is as wrong as one publishing at 17, and a consumer tuned against it would
 misbehave on hardware.
 
 Eight rates remain **below** their target because the PX4 source is slower —
-`vehicle_status_v4` publishes at ~2 Hz where DJI's `flight_status` is 25 Hz,
+`vehicle_status_v5` publishes at ~2 Hz where DJI's `flight_status` is 25 Hz,
 `battery_status_v1` at 1 Hz against 21 Hz. Fixing this means republishing from
 cached state on a timer, which is what real DJI firmware does.
 

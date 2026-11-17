@@ -53,6 +53,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
+import cpu
+
 # Unit states. A unit is in exactly one of these at any moment.
 STOPPED = "stopped"
 STARTING = "starting"
@@ -115,6 +117,7 @@ class Unit:
         self.exit_code: int | None = None
         self.detail = ""
         self.ring: deque[str] = deque(maxlen=RING)
+        self.cpu = cpu.Sampler()
         self._master: int | None = None
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
@@ -134,7 +137,14 @@ class Unit:
             "exit_code": self.exit_code,
             "detail": self.detail,
             "description": self.spec.description,
+            "cpu_pct": round(self.cpu.cpu_pct, 1),
+            "cpu_seconds": round(self.cpu.cpu_seconds, 1),
+            "rss_bytes": self.cpu.rss,
         }
+
+    def sample_cpu(self) -> None:
+        """Refresh this unit's CPU/memory reading. Cheap; call it on a timer."""
+        self.cpu.sample(self.pid if self.alive else None)
 
     @property
     def alive(self) -> bool:
@@ -166,6 +176,7 @@ class Unit:
             # still held the previous run's last words. Observed exactly that:
             # "Package not found | Package not found", one from each attempt.
             self.ring.clear()
+            self.cpu.reset()
             self._set_state(STARTING)
 
             # A pty, not a pipe -- see the module docstring.
@@ -234,8 +245,27 @@ class Unit:
             time.sleep(1.0)
         # Running but not usable is a distinct, and much more confusing, state
         # than dead -- so say which one it is.
+        #
+        # AND KILL IT. Marking this FAILED while leaving the process running
+        # used to mean `alive` stayed True forever, which makes the NEXT
+        # start() call a silent no-op (see start()'s `if self.alive: return`)
+        # -- a retry that looks like nothing happened. A unit that could not
+        # prove it was ready gets the same teardown a stop() would give it,
+        # so pressing the key again actually starts something.
+        with self._lock:
+            if self.alive:
+                try:
+                    pgid = os.getpgid(self._proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    self._proc.wait(timeout=5)
+                except Exception:
+                    pass
         self._set_state(FAILED, f"did not become ready within "
-                                f"{self.spec.ready_timeout:.0f}s (process is alive)")
+                                f"{self.spec.ready_timeout:.0f}s; killed it so "
+                                f"retrying is possible")
 
     def stop(self) -> None:
         with self._lock:

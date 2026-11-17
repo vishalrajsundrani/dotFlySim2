@@ -4,8 +4,8 @@ The bridge node: turns the route tables into live DDS endpoints.
 Three design decisions carry most of the weight here.
 
 1. ENDPOINT SHARING
-   Four routes read /fmu/out/vehicle_status_v4 (flight status, display mode,
-   anomaly, RC link) and two read /wrapper/psdk_ros2/rc. Creating one
+   Four routes read settings.sim_topics["vehicle_status"] (flight status,
+   display mode, anomaly, RC link) and two read /wrapper/psdk_ros2/rc. Creating one
    subscription per route would mean N deserialisations of every sample. Routes
    that agree on (topic, type, QoS) share a single endpoint and fan out to
    handlers in Python instead. Publishers are reference-counted the same way,

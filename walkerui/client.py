@@ -150,3 +150,7 @@ class Client:
 
     def constraints(self) -> dict:
         return self.call("constraints")
+
+    def projects_running(self) -> dict:
+        """Every project instance walkerd is or was supervising this run."""
+        return self.call("projects_running")

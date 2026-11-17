@@ -189,11 +189,20 @@ In the **project picker**: **Enter** rebuilds and flies; **Shift+Enter** (or
 
 ### A terminal per unit
 
-`sim`, `bridge`, `project`, `rviz` and `qgc` each open their own window the
-moment they start — PX4's live console, the bridge's route table, a mission's
-build and step transitions. Closing a window **detaches**; it does not stop the
-unit. Walker keeps showing the important lines from all of them in its own log
-pane.
+`sim`, `bridge`, `rviz`, `qgc`, and every running project instance each open
+their own window the moment they start — PX4's live console, the bridge's
+route table, a mission's build and step transitions. Closing a window
+**detaches**; it does not stop the unit. Walker keeps showing the important
+lines from all of them in its own log pane.
+
+**Any number of projects may run at once**, on the same sim and bridge: a
+project is a ros2 node, and nothing stops two or twenty of them running
+together. Press `p` to launch another one — it never stops whatever is
+already running — and `m` to see every instance that has run this session:
+its state, how long it has run, and its CPU cost (instantaneous % and the
+running total in CPU-seconds, read from `/proc` for the instance's whole
+process tree). walkerd arbitrates nothing between simultaneous projects; it
+is on you not to fly two that fight over the same command topic.
 
 Walker tries `ptyxis`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `kitty`,
 `alacritty`, `wezterm`, `foot`, `x-terminal-emulator`, then `xterm`.
@@ -208,10 +217,10 @@ Rows = what you are starting. Columns = what is already running.
 
 | start ↓ / running → | sim | project | replay | record | qgc |
 |---|---|---|---|---|---|
-| **project** | ✅ required | ⛔ one at a time | ⛔ the bag owns the surface | ✅ | ✅ QGC auto-locked |
-| **replay** | ✅ **required** | ⛔ stop the project | ⛔ one at a time | ✅ | ✅ QGC auto-locked |
+| **project** | ✅ required | ✅ **any number at once** | ⛔ the bag owns the surface | ✅ | ✅ full participant |
+| **replay** | ✅ **required** | ⛔ stop every project first | ⛔ one at a time | ✅ | ✅ starts locked |
 | **record** | ✅ | ✅ **always allowed** | ✅ **always allowed** | ⛔ one at a time | ✅ |
-| **qgc** | ✅ required | ✅ starts locked | ✅ starts locked | ✅ | — |
+| **qgc** | ✅ required | ✅ full participant | ✅ starts locked | ✅ | — |
 | **rviz** | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 **Recording is never locked out.** You can start one during a mission, during a
@@ -221,14 +230,17 @@ time is the only limit.
 A refusal always names what is holding the lock and the key that clears it:
 
 ```
-project refused: one C++ project at a time   [stop the running project first (p)]
+project refused: a replay owns the wrapper surface   [stop the replay first (R)]
 ```
 
-**QGC is locked, not warned.** While a mission holds the flight lock, a MAVLink
-relay drops QGC's arm, disarm, mode-change, joystick, mission-upload and
-parameter traffic before it reaches PX4 — while telemetry keeps flowing, so QGC
-stays a complete instrument panel. The lock releases the moment the mission
-ends, including when it ends by itself.
+**QGC is locked only by a replay, never by a project.** While a *replay* holds
+the flight lock, a MAVLink relay drops QGC's arm, disarm, mode-change,
+joystick, mission-upload and parameter traffic before it reaches PX4 — while
+telemetry keeps flowing, so QGC stays a complete instrument panel. The lock
+releases the moment the replay ends. Projects do not take this lock: with
+several able to run at once, "whoever is running owns command" stops meaning
+anything, so QGC and every running project are equally free to command the
+aircraft, and avoiding conflicts between them is on the operator.
 
 The table above lives in `walkerd/constraints.py`. Walker's help screen and
 walkerd's enforcement both read it, so they cannot drift.

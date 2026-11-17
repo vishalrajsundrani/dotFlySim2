@@ -104,7 +104,15 @@ def _default_sim_topics() -> Dict[str, str]:
     a rename without reading PX4's dds_topics.yaml.
     """
     return {
-        "vehicle_status": "/fmu/out/vehicle_status_v4",
+        # v4 -> v5: PX4 bumped VehicleStatus's MESSAGE_VERSION. Publisher
+        # count on _v4 went to 0 and _v5 appeared in its place -- caught by
+        # `ros2 topic info -v /fmu/out/vehicle_status_v4` showing no
+        # publisher while _v5 had one. Every route fed by this setting
+        # (flight_status, display_mode, flight_anomaly, rc_link) went
+        # silent, which is what made the bridge unit sit in `starting` for
+        # 120s and then fail: walkerd's readiness probe waits on
+        # flight_status, and nothing was producing it.
+        "vehicle_status": "/fmu/out/vehicle_status_v5",
         "local_position": "/fmu/out/vehicle_local_position_v1",
         # NOT vehicle_global_position_v1. PX4's message versioning is per
         # message, not global: VehicleStatus and VehicleLocalPosition carry a
@@ -129,7 +137,17 @@ def _default_sim_topics() -> Dict[str, str]:
         "failsafe_flags": "/fmu/out/failsafe_flags",
         "trajectory_setpoint": "/fmu/in/trajectory_setpoint",
         "offboard_control_mode": "/fmu/in/offboard_control_mode",
-        "vehicle_command": "/fmu/in/vehicle_command",
+        # Unversioned -> _v1: same per-message version bump as vehicle_status
+        # above, but on an INCOMING topic this time, and silent in a different
+        # way. `ros2 topic info -v /fmu/in/vehicle_command` showed the bridge
+        # as the only publisher and 0 subscribers; the microXRCE agent
+        # subscribes to /fmu/in/vehicle_command_v1 instead, with 0 publishers
+        # until this changed. Every arm/takeoff/land command the bridge sent
+        # (bridge.takeoff(), land(), arm(), etc.) went out into a topic PX4
+        # never received, so it was never rejected or acted on -- no console
+        # warning, no vehicle_command_ack, just a mission that looped in
+        # TAKEOFF for its whole timeout with status=STOPPED the entire time.
+        "vehicle_command": "/fmu/in/vehicle_command_v1",
         "lrf_range": "/drone/lrf/range",
         # Sources for the wider wrapper telemetry surface. Unversioned because
         # neither message is versioned in PX4's dds_topics.yaml, unlike the

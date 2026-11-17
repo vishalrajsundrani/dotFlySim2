@@ -37,13 +37,15 @@ from collections import deque
 #
 # A topic entry may be a LIST of candidates, tried together.
 #
-# WHY: PX4 now versions its uORB topics, so the graph carries both
-# /fmu/out/vehicle_status_v1 and /fmu/out/vehicle_status_v4 -- and on this
-# build only v4 actually publishes. Subscribing to the wrong one gives a topic
-# that exists, shows a publisher, and never delivers a message: precisely the
-# silent failure these probes exist to catch, and one that would otherwise
-# reappear with every PX4 upgrade. Subscribing to all candidates and counting
-# them together makes the probe survive the version churn.
+# WHY: PX4 now versions its uORB topics, so the graph can carry
+# /fmu/out/vehicle_status_v1, _v4 AND _v5 at once -- and only one of them
+# actually publishes, which one having already changed once (v4 -> v5,
+# tracked in bridge/simty/settings.py). Subscribing to the wrong one gives a
+# topic that exists, shows a publisher, and never delivers a message:
+# precisely the silent failure these probes exist to catch, and one that
+# would otherwise reappear with every PX4 upgrade. Subscribing to all
+# candidates and counting them together makes the probe survive the version
+# churn -- newest first, since that is the one most likely to be live.
 WATCH = [
     ("clock", "gazebo clock", "/clock", "rosgraph_msgs/msg/Clock", "default",
      "Gazebo is stepping and ros_gz_bridge is up"),
@@ -54,8 +56,8 @@ WATCH = [
      "px4_msgs/msg/VehicleAttitude", "sensor",
      "the estimator is producing an attitude solution"),
     ("status", "px4 status",
-     ["/fmu/out/vehicle_status_v4", "/fmu/out/vehicle_status_v1",
-      "/fmu/out/vehicle_status"],
+     ["/fmu/out/vehicle_status_v5", "/fmu/out/vehicle_status_v4",
+      "/fmu/out/vehicle_status_v1", "/fmu/out/vehicle_status"],
      "px4_msgs/msg/VehicleStatus", "sensor",
      "arming state and nav mode, which the bridge turns into FlightStatus"),
     ("w_status", "wrapper flight_status", "/wrapper/psdk_ros2/flight_status",

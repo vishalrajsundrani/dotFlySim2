@@ -88,6 +88,34 @@ NAV_DLL_ACT = 0
 # walker warns when a project's TAKEOFF_ALT disagrees with it.
 MIS_TAKEOFF_ALT = 1.8
 
+# GNSS on-ground drift tolerance, raised from PX4's defaults (0.1 m/s / 0.2
+# m/s) to 1.0 / 2.0.
+#
+# models/m4e/model.sdf's navsat_sensor noise (see the comment on that sensor)
+# is deliberately tuned for demo_gnss_stereo_inertial's GNSS-factor
+# calibration fidelity, not for PX4's liking. At the defaults, PX4's on-ground
+# strict GNSS checks (src/lib/gnss/gnss_checks.cpp) never pass: the low-passed
+# position-drift estimate from that noise sits above GNSS_REQ_HDRIFT/VDRIFT
+# while disarmed, so GnssChecks::run() never reports passed() -- confirmed
+# live via `ekf2 status -v` (GPS samples buffered, never fused) and by the
+# repeating "Preflight: GPS Horizontal/Vertical Pos Drift too high" warning.
+# COM_ARM_WO_GPS does not help: it only controls how loudly a *failing* GNSS
+# check is reported (default 1 = WarningOnly, doesn't block arming by
+# itself), but GPS never gets accepted as a position source in the first
+# place, so vehicle_local_position.xy_valid stays false and PX4 reports
+# local_position_invalid, which DOES block arming for any externally
+# commanded (vehicle_command / MAVLink) arm -- exactly the path every
+# project's takeoff/motors_on call uses. `commander arm -f` from the pxh
+# console bypasses this, which is why the sim "works" from the console but
+# every project's TAKEOFF step timed out.
+#
+# Raising the thresholds (not the noise model) was verified live: with
+# GNSS_REQ_HDRIFT=1.0 and GNSS_REQ_VDRIFT=2.0, `commander check` reports OK,
+# the drift warnings stop, `vehicle_local_position.xy_valid` goes true, and a
+# normal (non-forced) `commander arm` succeeds.
+GNSS_REQ_HDRIFT = 1.0
+GNSS_REQ_VDRIFT = 2.0
+
 # ── what gets spawned alongside the airframe ────────────────────────────────
 # The payload/gimbal is a SEPARATE Gazebo model, teleported 50 times a second
 # to track the airframe. That is not a quirk: Gazebo's set_pose only sticks on

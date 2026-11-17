@@ -367,8 +367,12 @@ The second one has no counterpart on hardware. Enable the direction on
 walker's camera screen before starting the simulation (`README.md` §6).
 
 ```cpp
-// Payload: index 1 is the gimbal camera, 7 the FPV camera.
-//   camera_source 0 DEFAULT / 1 M4E_VIS -> FHD, 3 M4E_4K -> 4K
+// Payload: index 1 and 2 both land on main_camera_stream (one gimbal rig,
+// two valid liveview ports on this aircraft's wrapper build); 7 is the FPV
+// camera and does not produce frames on this M4E (see below).
+//   index 1, source 0 DEFAULT / 1 M4E_VIS -> FHD, 3 M4E_4K -> 4K
+//   index 2, source 0 DEFAULT / 1 M4E_VIS -> FHD (4K untested at index 2,
+//   refused rather than guessed at)
 auto stream = create_client<psdk_interfaces::srv::CameraSetupStreaming>(
     "/wrapper/psdk_ros2/camera_setup_streaming");
 auto s = std::make_shared<psdk_interfaces::srv::CameraSetupStreaming::Request>();
@@ -377,6 +381,23 @@ s->camera_source  = 0;
 s->start_stop     = true;
 s->decoded_output = true;   // false is refused: there is no H.264 encoder here
 ```
+
+**Known-good `payload_index`/`camera_source` pairs on this aircraft**
+(`m4e_camera_ros2_guide.md`, confirmed on real hardware and mirrored here):
+
+| `payload_index` | `camera_source` | lands on | result |
+|---|---|---|---|
+| 1 (NO_1) | 0 DEFAULT | `main_camera_stream` | FHD |
+| 1 (NO_1) | 1 M4E_VIS | `main_camera_stream` | FHD |
+| 1 (NO_1) | 3 M4E_4K | `main_camera_stream` | 4K |
+| 2 (NO_2) | 0 DEFAULT | `main_camera_stream` | FHD |
+| 2 (NO_2) | 1 M4E_VIS | `main_camera_stream` | FHD |
+| 7 (FPV) | 0 | `fpv_camera_stream` | **no frames** — the SDK accepts the request, nothing decodable arrives; treat FPV as unavailable on this aircraft |
+
+Anything else (`2`/`3`, `3`/anything, `7`/anything but `0`, ...) is refused by
+name rather than silently streaming nothing. **One stream at a time** — stop
+the current camera before starting another, with the *same* `payload_index`
+and `camera_source` you started with.
 
 **Three things will bite a mission that assumes otherwise.**
 

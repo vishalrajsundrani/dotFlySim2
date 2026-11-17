@@ -1689,9 +1689,20 @@ def _h_camera_get_file_list(request, response, bridge):
                  f"{int(bridge.shared.get('photo_count', 0))} photo(s) were counted only")
 
 
-# dji_liveview.h: the only two positions psdk_ros2 publishes for, and the
-# wrapper route each one lands on.
-_LIVEVIEW_POSITION = {1: "main_camera_out", 7: "fpv_camera_out"}
+# dji_liveview.h: the positions this wrapper build publishes for, and the
+# route each one lands on.
+#
+# Upstream psdk_ros2 only handles NO_1 and FPV (1 and 7); positions 2 and 3
+# fall through undefined behaviour there. m4e_camera_ros2_guide.md §2.2
+# reports this aircraft's wrapper build is a fork or newer release that DOES
+# answer position 2 (payload port NO_2), landing on the same
+# main_camera_stream route as NO_1 -- confirmed empirically with sources 0
+# and 1, both "works". There is one gimbal rig in this airframe (section
+# 3.3 of CAMERA_ARCHITECTURE.md), so NO_2 is modelled as a second valid port
+# number into that same route rather than a fabricated second sensor; a
+# consumer sees the same frame_id/size rules either way (frame_id is keyed
+# by camera_source alone, never by payload_index -- see converters.py).
+_LIVEVIEW_POSITION = {1: "main_camera_out", 2: "main_camera_out", 7: "fpv_camera_out"}
 
 # dji_liveview.h, the M4E's entries plus the generic default. These integers
 # are reused across aircraft -- 1 is M4E_VIS here and H20_WIDE on an H20 -- so
@@ -1700,6 +1711,12 @@ _LIVEVIEW_POSITION = {1: "main_camera_out", 7: "fpv_camera_out"}
 # the integer, not the name, and testing `source in _M4E_SOURCES` silently
 # compares an int against the string keys and rejects everything.
 _M4E_SOURCES = {"DEFAULT": 0, "M4E_VIS": 1, "M4E_4K": 3}
+
+# What the guide actually confirmed at payload_index 2: DEFAULT and M4E_VIS,
+# not M4E_4K. Refusing the untested combination is the same policy as
+# refusing positions 2/3 altogether used to be -- imitate what was verified,
+# not what seems likely.
+_SOURCES_AT_INDEX_2 = {"DEFAULT": 0, "M4E_VIS": 1}
 
 
 def _h_camera_setup_streaming(request, response, bridge):
@@ -1757,18 +1774,19 @@ def _h_camera_setup_streaming(request, response, bridge):
     if route_key is None:
         return reply(False,
                      f"payload_index {index} is not a streaming position; the M4E "
-                     f"serves {_LIVEVIEW_POSITION[1]} at 1 (NO_1) and "
+                     f"serves {_LIVEVIEW_POSITION[1]} at 1 (NO_1) and 2 (NO_2), and "
                      f"{_LIVEVIEW_POSITION[7]} at 7 (FPV)")
     if not start:
         bridge.shared["camera_streaming"] = False
         bridge.submit_slow(lambda b, name=route_key: b.set_route_enabled(name, False))
         return reply(True, f"{route_key} stopped")
 
-    if source not in _M4E_SOURCES.values():
+    sources = _SOURCES_AT_INDEX_2 if index == 2 else _M4E_SOURCES
+    if source not in sources.values():
         return reply(False,
-                     f"camera_source {source} is not one this aircraft offers; "
-                     f"the M4E has " + ", ".join(
-                         f"{v} ({k})" for k, v in _M4E_SOURCES.items()))
+                     f"camera_source {source} is not one this aircraft offers "
+                     f"at payload_index {index}; it has " + ", ".join(
+                         f"{v} ({k})" for k, v in sources.items()))
     if not decoded:
         return reply(False,
                      "encoded output is not simulated: upstream would publish an "
@@ -1787,7 +1805,7 @@ def _h_camera_setup_streaming(request, response, bridge):
     bridge.shared["camera_source"] = source
     bridge.shared["camera_position"] = index
     bridge.submit_slow(lambda b, name=route_key: b.set_route_enabled(name, True))
-    return reply(True, f"{route_key} streaming, source {source}")
+    return reply(True, f"{route_key} streaming, payload_index {index}, source {source}")
 
 
 def _h_camera_shoot_burst(request, response, bridge):
